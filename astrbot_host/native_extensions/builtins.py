@@ -149,8 +149,11 @@ def create_bundled_extension(data_root, name, *, now=None, context=None, control
     config = ExtensionSettings(root, name)
     module = import_module("." + name + ".runtime", __package__)
     runtime = getattr(module, name.title() + "Runtime")(context, config, config.root, controller)
+    # Local game maintenance is a new immutable descriptor, retaining 7.1.3
+    # and its grants as the predecessor rather than replacing its artifact.
+    version = PRODUCT_VERSION + "+game.20261109.2" if name == "game" else PRODUCT_VERSION
     return BundledNativeLease("astrbot_plugin_private_companion." + name,
-        runtime.build_native(PRODUCT_VERSION), api=runtime, factory=factory,
+        runtime.build_native(version), api=runtime, factory=factory, package_version=version,
         furniture=FurnitureDescriptor(name, name, labels[name], name))
 
 

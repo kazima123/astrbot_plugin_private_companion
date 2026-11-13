@@ -33,7 +33,7 @@ from companion_v2.execution.runner import CAPACITY_REFUSALS, ExactTaskRunner, Ru
 from companion_v2.execution.service import outcome
 from companion_v2.expression.configuration import read_settings as expression_settings
 from companion_v2.foundation.outcome import Outcome
-from companion_v2.foundation.refs import OperationRef, VersionRef, normalize_utc
+from companion_v2.foundation.refs import OperationRef, VersionRef, ScopeKind, normalize_utc
 from companion_v2.model_gateway.models import ModelCompletion, ModelTaskProfile, is_released
 from companion_v2.relationships.private_access import REVOCABLE_ABSENCE_CODES
 from companion_v2.role_work.state import humanized
@@ -139,6 +139,7 @@ def _segmentation_policy(settings):
 class ProactiveContacts:
     def __init__(self, configuration, memory_push=None):
         self.configuration, self.runtime = configuration, configuration.runtime
+        self.game_provider = None
         # 推送端口是旁路：它记录角色说过的话，但不参与「说不说、说什么」的决定。
         self.memory_push = DEFAULT_MEMORY_PUSH if memory_push is None else memory_push
         self.sources, self.operations = SourceRepository(self.runtime), OperationRepository(self.runtime)
@@ -1012,6 +1013,20 @@ class ProactiveContacts:
                 self.gateway.ledger.discard(completion.call_id)
             raise
 
+    def _game_invitation(self, context, purpose, contact_id, at):
+        provider = self.game_provider
+        if provider is None or purpose not in {"play", "invitation"} or context.scope.kind is not ScopeKind.PRIVATE:
+            return None
+        chance = int(digest(contact_id)[:8], 16)
+        if chance % 100 >= getattr(provider.plugin, "invite_probability", 18):
+            return None
+        kinds = ("gomoku", "tictactoe") if chance % 2 else ("tictactoe", "gomoku")
+        for kind in kinds:
+            if (provider.invitation_authorized(context, kind)
+                    and provider.invitation_status(json.loads(encode(context)), kind, at=at.timestamp())["allowed"]):
+                return kind
+        return None
+
     async def _generate(self, run):
         job = self._pending[run.task.task_id]
         at = self.tasks.now()
@@ -1020,6 +1035,11 @@ class ProactiveContacts:
         records = self._records(job.context, job.intent.thought.evidence.sources, at, hashes=job.source_hashes)
         source_origin = job.automatic_origin or job.diagnostic_origin
         contact_id = "contact-" + digest(run.task.task_id)
+        game_invitation = self._game_invitation(job.context, job.intent.purpose, contact_id, at)
+        game_instruction = ("本轮若决定联系，只自然邀请对方一起玩"
+            + {"gomoku": "五子棋", "tictactoe": "井字棋"}[game_invitation]
+            + "，先询问是否愿意。尚未开局，必须等明确答应后才创建；不要编造房间链接、棋局或游玩经历。"
+            if game_invitation else "本轮没有获得下棋邀请资格，请选择其他话题，不主动邀请五子棋或井字棋。")
         try:
             reactions_available = self._reaction_available(job.context, contact_id,
                 diagnostic=job.diagnostic_image_intent is not None)
@@ -1110,7 +1130,7 @@ class ProactiveContacts:
                 memory=memory_materials, expression=expression_materials,
                 rhythm_snapshot=rhythm_snapshot, role_state=role_state, recent_life=recent_life)
             extra_instruction = "\n".join(text for text in
-                (segmentation.instruction, presentation.instruction,
+                (game_instruction, segmentation.instruction, presentation.instruction,
                  news_presentation_instruction(segmentation) if job.intent.purpose == "news"
                  or source_origin is not None and "news_event" in source_origin else "") if text)
             if extra_instruction:
@@ -1306,6 +1326,7 @@ class ProactiveContacts:
             document = {"decision": "skip" if body is None else
                             "judge_pending" if judge_task is not None else "send",
                 "purpose": job.intent.purpose, "preference_token": job.preference_token,
+                "game_invitation": game_invitation if body is not None else None,
                 "sources": job.intent.thought.evidence.sources, "source_hashes": job.source_hashes,
                 "administrator_test": job.administrator_test,
                 "diagnostic_image": job.diagnostic_image_intent is not None,
@@ -1495,6 +1516,9 @@ class ProactiveContacts:
                     or original.payload_hash != parts[original.sequence]["payload_hash"]):
                 raise TaskError("contact_draft_unavailable", "confirmed contact part no longer matches its draft")
             opened_at = datetime.fromisoformat(data["opened_at"])
+            if original.sequence == 0 and data.get("game_invitation") and self.game_provider is not None:
+                self.game_provider.confirm_invitation(json.loads(encode(original.context)), data["game_invitation"],
+                    original.source_ref, datetime.fromisoformat(delivered["delivered_at"]).timestamp())
             deadline = datetime.fromisoformat(data["expires_at"])
             if original.sequence == 0 and data.get("expression_style") is not None and self.expression_context is not None:
                 try:
@@ -1814,6 +1838,12 @@ class ProactiveContacts:
     @outcome
     def delivery_text(self, request, at):
         row, data, voice, poke, parts = self._draft(request, at)
+        if data.get("game_invitation"):
+            provider = self.game_provider
+            if (provider is None or not provider.invitation_authorized(request.context, data["game_invitation"])
+                    or not provider.invitation_status(json.loads(encode(request.context)), data["game_invitation"],
+                        at=at.timestamp(), contact_id=row["contact_id"])["allowed"]):
+                raise TaskError("game_invitation_no_longer_eligible", "game invitation eligibility changed before delivery")
         opened_at = datetime.fromisoformat(data["opened_at"])
         if (request.deadline_at != datetime.fromisoformat(data["expires_at"])
                 or request.not_before < opened_at or request.not_before >= request.deadline_at

@@ -28,7 +28,9 @@ def stamp_game_changes(previous, draft, now):
     for scope, rooms in draft.items():
         for game_id, room in rooms.items():
             before = previous.get(scope, {}).get(game_id)
-            if before == room:
+            # A memory receipt is not another move or a new end time.
+            if before is not None and ({k: v for k, v in before.items() if k != "memory"}
+                    == {k: v for k, v in room.items() if k != "memory"}):
                 continue
             if before is None:
                 room["created_at"] = now

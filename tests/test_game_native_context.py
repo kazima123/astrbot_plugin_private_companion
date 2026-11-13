@@ -7,7 +7,7 @@ import tempfile
 import time
 from types import SimpleNamespace as NS
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from tests import astrbot_data_root as _host_import_root
 from astrbot.core.provider.entities import ProviderRequest
@@ -74,9 +74,9 @@ class NativeGameContextTests(unittest.IsolatedAsyncioTestCase):
         created = await self.execute(games.GOMOKU_CREATE, {"difficulty": "normal", "human_side": "white"}, "start")
         game_id = created["result"]["game"]["game_id"]
         ticket = self.provider.issue_web_ticket(game_id)
-        for column in range(8, 12):
-            result = await self.provider.web_action(ticket, {"action": "interact", "source": {"kind": "tray", "color": 1},
-                "target": {"row": 7, "column": column, "x": .5, "y": .5}, "interaction": "click"})
+        with patch.object(games.GomokuGame, "choose_bot_move", side_effect=[(7, col) for col in range(8, 12)]):
+            for column in range(4):
+                result = await self.provider.web_action(ticket, {"action": "move", "row": 0, "column": column * 2})
         self.assertEqual(result["game"]["status"], "finished")
         self.assertEqual(result["game"]["outcome"], "bot")
         return game_id

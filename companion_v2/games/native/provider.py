@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+from datetime import datetime, timedelta, timezone
 from collections import Counter, OrderedDict
 import hashlib
 import inspect
@@ -70,8 +71,11 @@ DRAW_CREATE = "game.draw_guess.create"
 DRAW_GUESS = "game.draw_guess.guess"
 DRAW_GIVE_UP = "game.draw_guess.give_up"
 DRAW_CLOSE = "game.draw_guess.close"
-TICTACTOE_ACTIONS = {READ, CREATE, MOVE, CLOSE}
-GOMOKU_ACTIONS = {GOMOKU_READ, GOMOKU_CREATE, GOMOKU_MOVE, GOMOKU_CLOSE}
+INVITE = "game.tictactoe.invitation"
+GOMOKU_INVITE = "game.gomoku.invitation"
+INVITE_ACTIONS = {INVITE, GOMOKU_INVITE}
+TICTACTOE_ACTIONS = {READ, CREATE, MOVE, CLOSE, INVITE}
+GOMOKU_ACTIONS = {GOMOKU_READ, GOMOKU_CREATE, GOMOKU_MOVE, GOMOKU_CLOSE, GOMOKU_INVITE}
 XIANGQI_ACTIONS = {XIANGQI_READ, XIANGQI_CREATE, XIANGQI_MOVE, XIANGQI_CLOSE}
 TURTLE_ACTIONS = {TURTLE_READ, TURTLE_PRIVATE_CONTEXT, TURTLE_CREATE, TURTLE_ASK,
                   TURTLE_ANSWER, TURTLE_HINT, TURTLE_GIVE_UP, TURTLE_CLOSE}
@@ -395,7 +399,9 @@ def _view(record: dict[str, Any]) -> dict[str, Any]:
                 copy.deepcopy(record["events"][-24:] if kind in {"pig_dice", "blackjack"} else record["moves"]),
             "interactions": copy.deepcopy(record.get("interactions", [])[-24:])
             if kind in BOARD_GAME_KINDS else [],
-            "outcome": record.get("outcome")}
+            "outcome": record.get("outcome"),
+            "memory": copy.deepcopy(record.get("memory", {"state": "unavailable"})),
+            "ownership_version": record.get("ownership_version", 1)}
 
 
 def _turtle_private_context(record: dict[str, Any] | None) -> dict[str, Any]:
@@ -415,6 +421,7 @@ class GameStore:
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
+        self.now = time.time
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except FileNotFoundError:
@@ -493,7 +500,12 @@ class GameStore:
         self.data = data
 
     def commit(self, draft: dict[str, Any]) -> None:
-        stamp_game_changes(self.data["scopes"], draft["scopes"], time.time())
+        stamp_game_changes(self.data["scopes"], draft["scopes"], self.now())
+        for rooms in draft["scopes"].values():
+            for room in rooms.values():
+                if (room.get("ownership_version") == 2 and room["status"] != "active"
+                        and room["memory"]["state"] == "awaiting_result"):
+                    room["memory"]["state"] = "pending"
         temporary = self.path.with_name(f".{self.path.name}.{uuid.uuid4().hex}.tmp")
         try:
             with open(temporary, "w", encoding="utf-8", newline="\n") as handle:
@@ -523,6 +535,8 @@ class NativeGameProvider:
         self._async_lock = asyncio.Lock()
         self._xiangqi_cache: OrderedDict[str, tuple[str, XiangqiGame]] = OrderedDict()
         self._web_sessions: dict[str, dict[str, Any]] = {}
+        self.memory_sync = None
+        self.invitation_authorized = lambda context, kind: False
         self.closed = False
 
     def manifest(self) -> dict[str, Any]:
@@ -702,6 +716,13 @@ class NativeGameProvider:
                  "description": "关闭当前身份的指定你画我猜对局。", "parameters": game_id,
                  "side_effect": "local", "timeout_seconds": 10},
             ])
+        # Append new tools so the existing manifest prefix remains stable.
+        for action, label in ((INVITE, "井字棋"), (GOMOKU_INVITE, "五子棋")):
+            tools.append({"action": action, "capability": action, "source_owner": PROVIDER_ID,
+                "description": f"登记{label}邀请。想主动邀玩先传offer，只有allowed=true才邀请；对方拒绝游戏邀请时传decline，今天不再邀玩。只登记邀请，不会开局；对方明确要求或答应后另用create。",
+                "parameters": {"type": "object", "properties": {"decision": {"type": "string", "enum": ["offer", "decline"]}},
+                    "required": ["decision"], "additionalProperties": False},
+                "side_effect": "local", "timeout_seconds": 10})
         for tool in tools:
             if tool["action"] in CREATE_ACTIONS:
                 # A first browser entry may need the existing access tunnel.
@@ -742,6 +763,8 @@ class NativeGameProvider:
         if not isinstance(args, dict):
             raise NativeGameError("invalid_game_arguments")
         action = request["action"]
+        if action in INVITE_ACTIONS and (set(args) != {"decision"} or args["decision"] not in {"offer", "decline"}):
+            raise NativeGameError("invalid_game_arguments")
         if action in READ_ACTIONS and args:
             raise NativeGameError("invalid_game_arguments")
         if action in CREATE_ACTIONS:
@@ -903,7 +926,7 @@ class NativeGameProvider:
         action = request["action"]
         kind = _kind(action)
         if action in {WEB_INTERACT, WEB_REPLY}:
-            kind = _record_kind(rooms.get(args["game_id"], {}))
+            raise NativeGameError("game_normal_rules_required")
         if action not in CLOSE_ACTIONS and not getattr(self.plugin, f"native_v2_{kind}_enabled", False):
             raise NativeGameError(f"game_{kind}_disabled")
         if action in CREATE_ACTIONS:
@@ -1107,6 +1130,41 @@ class NativeGameProvider:
             room["outcome"] = "player" if game.winner == human else "bot" if game.winner == bot else "draw"
         return _view(room)
 
+    def invitation_status(self, context, kind, *, at=None, contact_id=None):
+        from companion_v2.execution.models import TaskContext
+        from companion_v2.memory.models import owner_key
+        owner = owner_key(TaskContext.restore(context))
+        now = self.store.now() if at is None else at
+        today = datetime.fromtimestamp(now, timezone(timedelta(hours=8))).date().isoformat()
+        state = self.store.data.get("invitations", {}).get(owner, {})
+        reason = None
+        if (self.closed or not getattr(self.plugin, "enable_proactive_invites", True)
+                or not getattr(self.plugin, f"native_v2_{kind}_enabled", False)):
+            reason = "disabled"
+        elif (any(room["status"] == "active" and _record_kind(room) in BOARD_GAME_KINDS
+                  for room in self.store.data["scopes"].get(_hash(_context(context)), {}).values())
+              or any(room["status"] == "active" and room.get("ownership_version") == 2
+                 and owner_key(TaskContext.restore(room["owner_context"])) == owner
+                 for rooms in self.store.data["scopes"].values() for room in rooms.values())):
+            reason = "active_game"
+        elif state.get("declined_day") == today:
+            reason = "declined_today"
+        elif (now - state.get("invited_at", 0) < getattr(self.plugin, "invite_cooldown_hours", 24) * 3600
+              and (not contact_id or state.get("contact_id") != contact_id)):
+            reason = "cooldown"
+        return {"allowed": reason is None, "reason": reason, "game_type": kind,
+                "owner": owner, "today": today}
+
+    def confirm_invitation(self, context, kind, contact_id, at):
+        status = self.invitation_status(context, kind, at=at, contact_id=contact_id)
+        with self.store.lock:
+            draft = copy.deepcopy(self.store.data)
+            state = draft.setdefault("invitations", {}).setdefault(status["owner"], {})
+            if state.get("contact_id") == contact_id:
+                return
+            state.update(invited_at=at, game_type=kind, contact_id=contact_id)
+            self.store.commit(draft)
+
     def _execute_sync(self, request: dict[str, Any], *, before_dispatch) -> dict[str, Any]:
         scope, _args = self._request(request)
         self._checked(before_dispatch)
@@ -1136,7 +1194,28 @@ class NativeGameProvider:
             operation = {"id": "game-op-" + uuid.uuid4().hex, "scope": scope,
                          "identity": identity, "state": "succeeded", "effect": "committed", "result": None}
             try:
-                operation["result"] = {"game": self._apply(draft, scope, request)}
+                if request["action"] in INVITE_ACTIONS:
+                    draft["scopes"].setdefault(scope, {})
+                    kind = _kind(request["action"])
+                    status = self.invitation_status(request["context"], kind)
+                    state = draft.setdefault("invitations", {}).setdefault(status["owner"], {})
+                    if request["arguments"]["decision"] == "decline":
+                        state["declined_day"] = status["today"]
+                        status.update(allowed=False, reason="declined_today")
+                    elif status["allowed"]:
+                        state.update(invited_at=self.store.now(), game_type=kind, contact_id=request["invocation_id"])
+                    operation["result"] = {"invitation": {key: status[key] for key in ("allowed", "reason", "game_type")}}
+                else:
+                    operation["result"] = {"game": self._apply(draft, scope, request)}
+                    if (_kind(request["action"]) in BOARD_GAME_KINDS
+                            and request.get("context", {}).get("audience", {}).get("scope", {}).get("kind") == "private"):
+                        room = draft["scopes"][scope][operation["result"]["game"]["game_id"]]
+                        if room.get("ownership_version") != 2:
+                            # A resumed old game is adopted only by its authenticated
+                            # original chat scope; a web ticket cannot assign an owner.
+                            room.update(ownership_version=2, owner_context=copy.deepcopy(request["context"]),
+                                        memory={"state": "awaiting_result"})
+                            operation["result"]["game"] = _view(room)
             except NativeGameError as exc:
                 draft = copy.deepcopy(self.store.data)
                 draft["scopes"].setdefault(scope, {})
@@ -1275,6 +1354,8 @@ class NativeGameProvider:
                 result = await self._execute_xiangqi(request, before_dispatch=before_dispatch)
             else:
                 result = self._execute_sync(request, before_dispatch=before_dispatch)
+        if self.memory_sync is not None:
+            self.memory_sync()
         return await self._with_room_access(request, result, before_dispatch=before_dispatch)
 
     async def _with_room_access(self, request, result, *, before_dispatch):
@@ -1413,8 +1494,8 @@ class NativeGameProvider:
             raise NativeGameError("invalid_game_arguments")
         action = payload["action"]
         maps = {
-            "tictactoe": {"move": MOVE, "interact": WEB_INTERACT, "reply": WEB_REPLY, "close": CLOSE},
-            "gomoku": {"move": GOMOKU_MOVE, "interact": WEB_INTERACT, "reply": WEB_REPLY, "close": GOMOKU_CLOSE},
+            "tictactoe": {"move": MOVE, "close": CLOSE},
+            "gomoku": {"move": GOMOKU_MOVE, "close": GOMOKU_CLOSE},
             "pig_dice": {"roll": PIG_ROLL, "hold": PIG_HOLD, "close": PIG_CLOSE},
             "blackjack": {"hit": BLACKJACK_HIT, "stand": BLACKJACK_STAND, "close": BLACKJACK_CLOSE},
             "xiangqi": {"move": XIANGQI_MOVE, "close": XIANGQI_CLOSE},
@@ -1522,6 +1603,10 @@ class NativeGameProvider:
                 self.store.commit(draft)
                 if kind == "xiangqi":
                     self._cache_xiangqi(room, game)
+            if kind in BOARD_GAME_KINDS:
+                if self.memory_sync is not None:
+                    self.memory_sync()
+                result = _view(self.store.data["scopes"][session["scope"]][session["game_id"]])
             return {"game": result, "expires_at": session["expires_at"]}
 
     async def create_mobile_game(self, owner_id: str, game_type: str,

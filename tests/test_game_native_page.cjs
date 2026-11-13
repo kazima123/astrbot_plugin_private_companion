@@ -141,97 +141,9 @@ test("手机先选点再确认，取消与轮询不落子，未变棋盘保持�
   assert.equal(JSON.parse(actions[0].options.body).column, 8);
 });
 
-test("自由摆子单独取子，拖出棋盘取消，返回对弈提供对方应手入口", async () => {
-  const game = boardGame("gomoku", 1);
-  const {$, requests, events} = await render(game);
-  click(byText($("boardToolbar"), "自由摆子"));
-  assert.equal($("pieceTray").hidden, false);
-  const tray = byText($("pieceTray"), "黑棋 · 你");
-  tray.listeners.pointerdown({pointerId: 1, clientX: 110, clientY: 110, preventDefault() {}});
-  events.pointermove({pointerId: 1, clientX: 650, clientY: 450});
-  events.pointerup({pointerId: 1, clientX: 900, clientY: 450});
-  assert.equal(requests.filter(request => request.options.method === "POST").length, 0);
-  assert.match($("notice").textContent, /已取消拖动/);
-  assert.equal(events.pointermove, undefined);
-  game.state.turn = 2;
-  click(byText($("boardToolbar"), "返回对弈"));
-  const reply = byText($("actionControls"), "让陪伴者接着下");
-  assert.equal(reply.disabled, false);
-  click(reply); await flush();
-  assert.deepEqual(JSON.parse(requests.find(request => request.options.method === "POST").options.body), {action: "reply"});
-});
-
 const pointer = (x, y, extras = {}) => ({pointerId: 1, clientX: x, clientY: y, button: 0,
   preventDefault() {}, stopPropagation() {}, ...extras});
 const part = ($, className) => descendants($("gameBoard")).find(element => element.className.split(/\s+/).includes(className));
-
-test("取子、换子、再次放回和预选只更新反馈，不重建棋盘或向服务端落子", async () => {
-  const {$, requests, poll} = await render(boardGame("gomoku", 1), {confirm: true});
-  const board = $("gameBoard").children[0];
-  click(point($, 7, 7)); click(point($, 6, 8));
-  assert.equal($("gameBoard").children[0], board);
-  assert.match(part($, "gomoku-interaction-readout").textContent, /I7/);
-  assert.equal(part($, "gomoku-lens").hidden, false);
-  click(byText($("boardToolbar"), "自由摆子"));
-  const freeBoard = $("gameBoard").children[0];
-  const tray = byText($("pieceTray"), "黑棋 · 你");
-  click(tray); await poll();
-  assert.equal($("gameBoard").children[0], freeBoard);
-  assert.equal(tray.attributes["aria-pressed"], "true");
-  click(tray);
-  assert.equal(tray.attributes["aria-pressed"], "false");
-  assert.equal(byText($("actionControls"), "放回棋子").disabled, true);
-  assert.equal(requests.filter(request => request.options.method === "POST").length, 0);
-});
-
-test("拖动既有棋子捕获指针、拿起源棋子、即时预览吸附落点，只提交一次", async () => {
-  const {$, requests, events, poll} = await render(boardGame("gomoku", 1));
-  click(byText($("boardToolbar"), "自由摆子"));
-  const piece = part($, "gomoku-piece");
-  piece.listeners.pointerdown(pointer(120, 120));
-  assert.equal(piece.capturedPointer, 1);
-  events.pointermove(pointer(400, 420));
-  assert.match(piece.className, /piece-lifted/);
-  assert.equal(part($, "gomoku-drag-piece").style.left, "300px");
-  assert.equal(part($, "gomoku-drag-piece").style.top, "320px");
-  assert.equal(part($, "gomoku-target").style.left, "50%");
-  assert.match(part($, "gomoku-interaction-readout").textContent, /H9/);
-  await poll();
-  assert.equal(requests.length, 1);
-  events.pointerup(pointer(400, 420));
-  click(piece); // Browser's trailing click after pointerup must not select again.
-  await flush();
-  const actions = requests.filter(request => request.options.method === "POST");
-  assert.equal(actions.length, 1);
-  assert.deepEqual(JSON.parse(actions[0].options.body), {action: "interact", source: {kind: "board", piece_id: "piece-1", color: 1},
-    target: {row: 8, column: 7, x: .5, y: .5}, interaction: "drag"});
-  assert.equal(events.pointermove, undefined);
-  assert.equal(piece.capturedPointer, null);
-  assert.equal(part($, "gomoku-drag-piece"), undefined);
-});
-
-test("占用落点先在棋盘提示，拖到原位或拖出棋盘放回，不消耗一次请求", async () => {
-  const {$, requests, events} = await render(boardGame("gomoku", 1));
-  click(byText($("boardToolbar"), "自由摆子"));
-  const piece = part($, "gomoku-piece");
-  piece.listeners.pointerdown(pointer(120, 120));
-  events.pointermove(pointer(200, 160));
-  assert.match(part($, "gomoku-target").className, /invalid/);
-  assert.match(part($, "gomoku-interaction-readout").textContent, /已有棋子/);
-  events.pointerup(pointer(200, 160));
-  assert.doesNotMatch(piece.className, /piece-lifted/);
-  piece.listeners.pointerdown(pointer(120, 120));
-  events.pointermove(pointer(400, 420));
-  events.pointerup(pointer(120, 120));
-  assert.match($("notice").textContent, /放回/);
-  piece.listeners.pointerdown(pointer(120, 120));
-  events.pointermove(pointer(800, 420));
-  assert.equal(part($, "gomoku-drag-piece").style.left, "700px");
-  assert.equal(part($, "gomoku-target").hidden, true);
-  events.pointerup(pointer(800, 420));
-  assert.match($("notice").textContent, /取消拖动/);
-  assert.equal(requests.filter(request => request.options.method === "POST").length, 0);
-});
 
 test("触摸滑动选点有放大预览，松手只预选，确认后执行正常落子", async () => {
   const {$, requests, events} = await render(boardGame("gomoku", 1), {confirm: true});
@@ -249,23 +161,6 @@ test("触摸滑动选点有放大预览，松手只预选，确认后执行正�
   await flush();
   assert.deepEqual(JSON.parse(requests.find(request => request.options.method === "POST").options.body),
     {action: "move", row: 6, column: 9, x: .5, y: .5});
-});
-
-test("Escape、触摸取消和窗口失焦会释放指针并还原棋子", async () => {
-  const {$, requests, events} = await render(boardGame("gomoku", 1));
-  click(byText($("boardToolbar"), "自由摆子"));
-  const piece = part($, "gomoku-piece");
-  for (const cancel of [() => events.keydown({key: "Escape", preventDefault() {}}),
-    () => events.pointercancel(pointer(400, 420)), () => events.blur()]) {
-    piece.listeners.pointerdown(pointer(120, 120));
-    events.pointermove(pointer(400, 420));
-    cancel();
-    assert.equal(events.pointermove, undefined);
-    assert.equal(piece.capturedPointer, null);
-    assert.doesNotMatch(piece.className, /piece-lifted/);
-    assert.equal(part($, "gomoku-drag-piece"), undefined);
-  }
-  assert.equal(requests.filter(request => request.options.method === "POST").length, 0);
 });
 
 test("请求未完成时暂停轮询，旧读取不会覆盖已提交的新棋盘", async () => {
@@ -302,19 +197,6 @@ test("响应丢失后只核对状态，保留已落棋子，不自动重放操�
   click(point($, 7, 7)); await flush(); await poll();
   assert.match($("gameSummary").textContent, /已落子 4 手/);
   assert.equal(requests.filter(request => request.options.method === "POST").length, 1);
-});
-
-test("自由摆子中的对局结束后回到只读棋盘，不保留拿子状态", async () => {
-  let state = boardGame("gomoku", 1);
-  const {$, poll, requests} = await render(state, {fetchState: () => ({game: state})});
-  click(byText($("boardToolbar"), "自由摆子"));
-  click(byText($("pieceTray"), "黑棋 · 你"));
-  state = boardGame("gomoku", 1, "finished", "bot");
-  await poll();
-  assert.equal($("gameBoard").children[0].dataset.mode, "play");
-  assert.equal($("pieceTray").hidden, true);
-  assert.equal($("actionControls").children.length, 0);
-  assert.equal(requests.filter(request => request.options.method === "POST").length, 0);
 });
 
 test("结束棋局标明最后一手和真实五子连线，可选择显示每一手编号", async () => {
@@ -354,4 +236,26 @@ test("井字棋仍显示圈叉，并按棋子标记区分双方", async () => {
   assert.equal(pieces[1].textContent, "○");
   assert.equal($("gameHistory").children[0].children[0].textContent, "陪伴者");
   assert.equal($("gameHistory").children[1].children[0].textContent, "你");
+});
+
+test("正式对弈不提供自由摆子、棋盒或单独替陪伴者落子入口", async () => {
+  const {$} = await render(boardGame("gomoku", 1));
+  assert.equal(byText($("gameSummary"), "自由摆子"), undefined);
+  assert.equal(byText($("actionControls"), "让陪伴者接着下"), undefined);
+  assert.equal($("pieceTray").hidden, true);
+});
+
+test("井字棋不能拖动已有棋子，终局清楚显示记忆保存状态", async () => {
+  for (const [state, text] of [["pending", "待保存"], ["saved", "已保存"], ["failed", "保存失败"]]) {
+    const game = boardGame("tictactoe", 1, "closed");
+    game.memory = {state};
+    const {$} = await render(game);
+    assert.match($("gameSummary").textContent, new RegExp(text));
+    assert.match($("gameSummary").textContent, /未分胜负/);
+    assert.equal($("pieceTray").hidden, true);
+    for (const piece of descendants($("gameBoard")).filter(node => node.dataset.pieceId)) {
+      assert.equal(piece.disabled, true);
+      assert.equal(piece.listeners.pointerdown, undefined);
+    }
+  }
 });

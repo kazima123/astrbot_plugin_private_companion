@@ -48,9 +48,12 @@ class NativeServiceLifecycleTests(unittest.IsolatedAsyncioTestCase):
         return lease
 
     async def test_existing_v2_owner_advances_without_independent_predecessor(self):
-        for name in ("together", "reality", "image"):
+        for name in ("together", "reality", "image", "game"):
             package = self.registry._lease(name).manifest.package
             previous = replace(package, package_version="2.1.0", artifact_hash="previous-v2-" + name)
+            if name == "game":
+                previous = replace(previous, capabilities=tuple(action for action in previous.capabilities
+                    if not action.endswith(".invitation")))
             self.repository.register_descriptor(previous, registered_at=NOW).unwrap()
             self.repository.acquire(extension_id=name, package_id=previous.package_id,
                 package_version=previous.package_version, expected_revision=0, observed_at=NOW).unwrap()
@@ -60,7 +63,7 @@ class NativeServiceLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.addAsyncCleanup(reloaded.aclose)
         reloaded.attach(self.application)
         reloaded.register_catalog(observed_at=NOW).unwrap()
-        for name in ("together", "reality", "image"):
+        for name in ("together", "reality", "image", "game"):
             installed = self.repository.installation(extension_id=name).unwrap()
             current = self.registry._lease(name).manifest.package
             self.assertEqual((installed.package_version, installed.artifact_hash),
@@ -76,7 +79,7 @@ class NativeServiceLifecycleTests(unittest.IsolatedAsyncioTestCase):
         await self.registry.start()
         await asyncio.gather(*(lease.start() for lease in self.registry._bundled_extensions))
         self.assertTrue(all(lease.state == "running" for lease in self.registry._bundled_extensions))
-        self.assertEqual(len(self.registry.declarations()), 63)
+        self.assertEqual(len(self.registry.declarations()), 66)  # upstream device.inspect + two board invitations
         await self.registry.aclose()
         await self.registry.aclose()
         self.assertTrue(all(not lease.current(self.context) for lease in self.registry._bundled_extensions))

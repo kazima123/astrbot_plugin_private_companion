@@ -150,39 +150,19 @@ class NativeGameWebTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("mobile-owner-2", persisted)
         self.assertEqual(len(self.provider.list_web_games()), 2)
 
-    async def test_bot_reply_resumes_free_placement_without_adding_a_human_move(self):
+    async def test_formal_board_rejects_reposition_and_bot_only_turn_without_mutation(self):
         for kind in ("gomoku", "tictactoe"):
-            created = await self.provider.create_mobile_game(f"resume-{kind}", kind)
+            created = await self.provider.create_mobile_game("formal-board", kind)
             ticket = created["ticket"]
-            row = column = 7 if kind == "gomoku" else 1
-            await self.provider.web_action(ticket, {"action": "interact", "source": {"kind": "tray", "color": 1},
-                "target": {"row": row, "column": column, "x": .5, "y": .5}, "interaction": "click"})
-            result = await self.provider.web_action(ticket, {"action": "reply"})
-            self.assertEqual(len(result["game"]["moves"]), 2)
-            self.assertEqual(result["game"]["moves"][0], [row, column, 1])
-            self.assertEqual(result["game"]["moves"][1][2], 2)
-            state = result["game"]["state"]
-            self.assertEqual(state["turn"], 1)
-            self.assertEqual(state["pieces"][1]["x"], .5)
-            with self.assertRaisesRegex(game_provider.NativeGameError, "game_illegal_move"):
-                await self.provider.web_action(ticket, {"action": "reply"})
-            self.assertEqual(len((await self.provider.web_state(ticket))["game"]["moves"]), 2)
-
-    async def test_reply_uses_actual_bot_color_and_rejects_finished_or_nonboard_games(self):
-        created = await self.provider.execute(request(self.provider, game_provider.GOMOKU_CREATE,
-            {"difficulty": "normal", "human_side": "white"}, "resume-white"), before_dispatch=lambda: True)
-        ticket = self.provider.issue_web_ticket(created["result"]["game"]["game_id"])
-        await self.provider.web_action(ticket, {"action": "interact", "source": {"kind": "tray", "color": 2},
-            "target": {"row": 7, "column": 8, "x": .5, "y": .5}, "interaction": "click"})
-        result = await self.provider.web_action(ticket, {"action": "reply"})
-        self.assertEqual(result["game"]["moves"][-1][2], 1)
-        self.assertEqual(result["game"]["state"]["turn"], 2)
-        await self.provider.web_action(ticket, {"action": "close"})
-        with self.assertRaisesRegex(game_provider.NativeGameError, "game_not_active"):
-            await self.provider.web_action(ticket, {"action": "reply"})
-        dice = await self.provider.create_mobile_game("resume-dice", "pig_dice")
-        with self.assertRaisesRegex(game_provider.NativeGameError, "invalid_game_arguments"):
-            await self.provider.web_action(dice["ticket"], {"action": "reply"})
+            await self.provider.web_action(ticket, {"action": "move", "row": 0, "column": 0})
+            before = self.provider.store.path.read_bytes()
+            for payload in ({"action": "reply"},
+                            {"action": "interact", "source": {"kind": "tray", "color": 2},
+                             "target": {"row": 1, "column": 1, "x": .5, "y": .5}, "interaction": "click"},
+                            {"action": "move", "row": 0, "column": 0}):
+                with self.assertRaises(game_provider.NativeGameError):
+                    await self.provider.web_action(ticket, payload)
+                self.assertEqual(before, self.provider.store.path.read_bytes(), "Illegal moves must preserve the actual game")
 
 
 if __name__ == "__main__":

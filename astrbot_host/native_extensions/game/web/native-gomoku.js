@@ -246,9 +246,6 @@
           if (!freePlacement) options.append(toggle("落子确认", confirmPlacement, () => {
             cancelSelection(); confirmPlacement = !confirmPlacement; render();
           }, "gomoku-confirm-mode"));
-          options.append(toggle(freePlacement ? "返回对弈" : "自由摆子", freePlacement, () => {
-            cancelSelection(); freePlacement = !freePlacement; setNotice(""); render();
-          }, "gomoku-free-mode"));
         }
         host.append(status, options);
       }
@@ -412,11 +409,7 @@
           const cancel = button("放回棋子", () => { cancelSelection(); setNotice("已放回棋子"); });
           cancel.disabled = !getSelectedPiece() || isBusy();
           controls.appendChild(cancel);
-        } else if (!humanTurn(state)) {
-          const reply = button("让陪伴者接着下", () => sendAction({action: "reply"}), "primary");
-          reply.disabled = isBusy();
-          controls.appendChild(reply);
-        } else if (confirmPlacement) {
+        } else if (humanTurn(state) && confirmPlacement) {
           controls.appendChild(node("span", "gomoku-pending-label", pending ? `落点 ${coordinate(pending.row, pending.column)}` : "先选择一个交叉点"));
           const confirm = button("确认落子", () => {
             if (!pending || !active()) return;

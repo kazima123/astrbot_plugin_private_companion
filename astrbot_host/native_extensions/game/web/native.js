@@ -173,19 +173,11 @@
     const element = node("button", "floating-piece");
     element.type = "button";
     element.dataset.pieceId = piece.piece_id;
-    element.setAttribute("aria-label", `${piece.color === human ? "你的" : "Bot 的"}棋子，可拖动`);
+    element.setAttribute("aria-label", `${piece.color === human ? "你的" : "陪伴者的"}棋子`);
+    element.disabled = true;
     element.style.left = `${((piece.column + piece.x) / size) * 100}%`;
     element.style.top = `${((piece.row + piece.y) / size) * 100}%`;
     pieceVisual(element, piece.color, kind, human);
-    if (selectedPiece?.kind === "board" && selectedPiece.piece_id === piece.piece_id) {
-      element.classList.add("selected");
-    }
-    element.addEventListener("pointerdown", (event) => beginPiecePointer(event, pieceSource(piece), element));
-    element.addEventListener("click", (event) => {
-      event.stopPropagation();
-      if (Date.now() < dragClickGuardUntil) return;
-      selectPiece(pieceSource(piece));
-    });
     return element;
   }
 
@@ -208,16 +200,12 @@
         button.classList.add("logical-occupied");
       }
       const canMove = !busy && game.status === "active" && empty
-        && (selectedPiece || turnIsHuman(state));
+        && turnIsHuman(state);
       button.disabled = !canMove;
       button.addEventListener("click", (event) => {
         if (!empty) return;
         const target = cellTarget(event, button, rowIndex, columnIndex);
-        if (selectedPiece) {
-          const source = selectedPiece;
-          selectedPiece = null;
-          sendAction({action: "interact", source, target, interaction: "click"});
-        } else if (turnIsHuman(state)) {
+        if (turnIsHuman(state)) {
           sendAction({action: "move", ...target});
         }
       });
@@ -236,6 +224,7 @@
     if (game.game_type === "gomoku") { gomoku.renderTray(state); return; }
     const tray = $("pieceTray");
     tray.replaceChildren();
+    if (game.game_type === "tictactoe") { tray.hidden = true; return; }
     const isBoardGame = ["tictactoe", "gomoku"].includes(game.game_type);
     tray.hidden = !isBoardGame || game.status !== "active";
     if (!isBoardGame || game.status !== "active") return;
@@ -321,6 +310,13 @@
       const phase = game.status !== "active" ? stateLabel[game.status]
         : (isGomoku ? gomoku.phase() : (turnIsHuman(state) ? "轮到你了" : "对方思考中"));
       summary.append(pair, node("p", "summary-line", `已落子 ${state.move_count || 0} 手 · ${phase}`));
+      if (game.status !== "active") {
+        const labels = {pending: "待保存", saved: "已保存", failed: "保存失败，后台会自动重试", forgotten: "已按要求遗忘", unavailable: "此旧棋局没有长期记忆归属"};
+        const memory = node("p", "summary-line", `共同经历：${labels[game.memory?.state] || "待保存"}`);
+        memory.setAttribute("role", "status");
+        summary.append(memory);
+        if (game.status === "closed") summary.append(node("p", "summary-line", "中途结束，未分胜负"));
+      }
       if (isGomoku && state.last_move) summary.append(node("p", "summary-line", `最后一手：第 ${state.last_move[0] + 1} 行，第 ${state.last_move[1] + 1} 列`));
     } else if (game.game_type === "pig_dice") {
       const pair = node("div", "score-pair");
@@ -451,7 +447,7 @@
         controls.append(node("p", "summary-line", selected ? "选择要移动到的位置" : "点击红方棋子开始选择"));
       }
     }
-    if (game.status === "active") controls.append(iconButton("x", "结束对局", {action: "close"}, "warm"));
+    if (game.status === "active") controls.append(iconButton("x", "不玩了，结束本局", {action: "close"}, "warm"));
     if (game.game_type === "turtle_soup" && game.status === "active") {
       controls.append(node("span", "summary-line", "提问与推理继续在聊天中进行"));
     }

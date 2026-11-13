@@ -1,13 +1,22 @@
 """Project confirmed Game terminal receipts into private, sourced experiences."""
 
 import json
+import copy
+import logging
+import sqlite3
+from datetime import datetime, timedelta, timezone
 
-from companion_v2.execution.models import TaskError, digest, encode, require
+from companion_v2.execution.models import TaskContext, TaskError, digest, encode, require, stamp
 from companion_v2.execution.service import outcome
-from companion_v2.foundation.refs import ScopeKind
+from companion_v2.foundation.refs import ScopeKind, SourceRef, VersionRef
+from companion_v2.sources.models import SourceRecord
+from companion_v2.foundation.outcome import Outcome
 from companion_v2.conversation.native_tool_results import operation_rows
 
 from .models import Evidence, owner_key
+from . import codec
+
+logger = logging.getLogger(__name__)
 
 
 GAME_ACTIONS = {"game.tictactoe.move": ("tictactoe", "井字棋"),
@@ -65,6 +74,139 @@ class MemoryGameIngestion:
         self.closed = False
         self._last_advance = {}
         self._binding_offset = 0
+        self.native_provider = None
+        self._native_advanced_at = None
+
+    def attach_native(self, provider):
+        self.native_provider = provider
+        provider.store.now = lambda: self.tasks.now().timestamp()
+        provider.memory_sync = self.advance_native
+
+    @outcome
+    def record_board(self, room):
+        """One immutable producer original and one experience per owner/game.
+
+        This original is self-contained in the source repository, so rolling back
+        the game extension never makes previously saved experiences unreadable.
+        """
+        self._active()
+        context = TaskContext.restore(room["owner_context"])
+        self.memory.writer.access.check(context, "memory.propose")
+        identity = "board-experience-" + digest([owner_key(context), room["game_id"]])
+        head = self.runtime.read_one("SELECT state FROM memory_views WHERE view_id = ?", (identity,))
+        if head is not None:
+            # A lost game-file acknowledgement must not replay an already committed
+            # result, overwrite its enrichment, or resurrect an explicitly forgotten view.
+            return {"state": "saved" if head["state"] == "active" else "forgotten", "view_id": identity}
+        kind = room["game_type"]
+        label = {"gomoku": "五子棋", "tictactoe": "井字棋"}[kind]
+        ended = datetime.fromtimestamp(room["ended_at"], timezone.utc)
+        local = ended.astimezone(timezone(timedelta(hours=8)))
+        result = "中途结束、未分胜负" if room["status"] == "closed" else OUTCOMES[room["outcome"]]
+        human = ("黑棋" if room.get("human_side", "black") == "black" else "白棋") if kind == "gomoku" else "X"
+        bot = ({"黑棋": "白棋", "白棋": "黑棋"}[human]) if kind == "gomoku" else "O"
+        difficulty = {"easy": "简单", "normal": "普通", "hard": "困难"}[room["difficulty"]]
+        text = (f"{local:%Y年%m月%d日 %H:%M:%S}（UTC+8），用户与当前角色一起玩{label}，"
+                f"用户执{human}、角色执{bot}，{difficulty}难度，共落子{len(room['moves'])}步。"
+                f"结果：{result}。棋局编号：{room['game_id']}。")
+        if room["moves"]:
+            recent = room["moves"][-6:]
+            steps = "；".join(f"第{len(room['moves']) - len(recent) + index + 1}步"
+                f"{'用户' if stone == (1 if human in ('黑棋', 'X') else 2) else '角色'}落在({row+1},{column+1})"
+                for index, (row, column, stone) in enumerate(recent))
+            text += "最后的实际落子（行、列从1开始）：" + steps + "。"
+        original = {key: room[key] for key in ("game_id", "game_type", "difficulty", "status", "outcome",
+                    "moves", "created_at", "ended_at", "owner_context")}
+        original["human_side"] = human
+        payload = text + "\n" + encode({"schema": "memory.board-result.v2", "game": original})
+        reference = SourceRef(identity, "memory.game_result", context.scope, VersionRef(identity, 1), ended)
+        with self.runtime.transaction():
+            require(self.memory.writer.sources.publish(SourceRecord(reference, context.audience,
+                digest(payload), payload), observed_at=self.tasks.now()))
+            evidence = Evidence(reference, digest(payload), 0, len(text), digest(text),
+                context.role_binding.role.subject_id, "observation")
+            return require(self.memory.experiences.save(context, view_id=identity, expected_revision=0,
+                title=label + "：" + result,
+                statements=({"text": text, "evidence": (evidence,), "atoms": ()},),
+                entities=(label, "游戏:" + room["game_id"]), occurred_at=ended, operation_key=identity))
+
+    @outcome
+    def enrich_board(self, room):
+        """Existing maintenance adds traceable QQ quotations after the core result.
+
+        No model is needed to preserve originals. The existing dialogue reflection
+        remains responsible for interpreting them; a failed summary cannot remove
+        this result or turn guessed emotions into a shared experience.
+        """
+        from companion_v2.conversation.native_observations import rows_for_context, validate_observation
+        self._active()
+        context = TaskContext.restore(room["owner_context"])
+        view = require(self.memory.experiences.read(context, room["memory"]["view_id"]))
+        statements = tuple({"text": item["text"], "evidence": tuple(codec.evidence(e) for e in item["evidence"]),
+                            "atoms": ()} for item in view["statements"])
+        quotes = []
+        start = stamp(datetime.fromtimestamp(room["created_at"] - 60, timezone.utc))
+        end = stamp(datetime.fromtimestamp(room["ended_at"] + 120, timezone.utc))
+        for row in reversed(rows_for_context(self.runtime, context, start=start, end=end, limit=8)):
+            if TaskContext.restore(json.loads(row["context_json"])).scope != context.scope:
+                continue
+            reference = codec.source(json.loads(row["source_json"]))
+            try:
+                speaker, source_kind = validate_observation(self.runtime, row, context, reference)
+                source = self.memory.writer.access.source(context, reference)
+            except TaskError:
+                continue  # Withdrawn/forgotten originals are never replaced by guesses.
+            excerpt = source.payload[:240]
+            if not excerpt.strip():
+                continue
+            who = "用户" if row["kind"] == "input" else "角色（记录到发送调用返回）"
+            evidence = Evidence(reference, source.content_hash, 0, len(excerpt), digest(excerpt), speaker, source_kind)
+            quotes.append({"text": f"对局时段的QQ原话，{who}：{excerpt}", "evidence": (evidence,), "atoms": ()})
+        if not quotes or view["revision"] > 1:
+            return {"state": "complete"}
+        return require(self.memory.experiences.save(context, view_id=view["view_id"], expected_revision=1,
+            title=view["title"], statements=statements + tuple(quotes), entities=tuple(view["entities"]),
+            occurred_at=view["occurred_at"], operation_key=view["view_id"] + "-dialogue"))
+
+    def advance_native(self, *, enrich=False):
+        provider = self.native_provider
+        report = {"saved": 0, "blocked": []}
+        if provider is None or provider.closed:
+            return report
+        with provider.store.lock:
+            draft = copy.deepcopy(provider.store.data)
+            pending = [room for rooms in draft["scopes"].values() for room in rooms.values()
+                       if room.get("ownership_version") == 2 and room["status"] != "active"
+                       and (room["memory"]["state"] in {"pending", "failed"}
+                            or enrich and room["memory"]["state"] == "saved" and not room["memory"].get("enriched"))]
+            for room in pending[:self.page_size]:
+                if room["memory"]["state"] in {"pending", "failed"}:
+                    try:
+                        result = self.record_board(room)
+                    except (OSError, sqlite3.Error) as error:
+                        result = Outcome.failed("game_memory_storage_error", type(error).__name__)
+                    if result.is_success:
+                        saved = result.unwrap()
+                        room["memory"] = {"state": saved["state"], "view_id": saved["view_id"]}
+                        report["saved"] += 1
+                    else:
+                        room["memory"] = {"state": "failed", "error_code": result.failure.code}
+                        report["blocked"].append({"game_id": room["game_id"], "code": result.failure.code})
+                        logger.warning("Board result memory pending retry: %s", result.failure.code)
+                if (enrich and room["memory"]["state"] == "saved" and not room["memory"].get("enriched")
+                        and self.tasks.now().timestamp() >= room["ended_at"] + 120):
+                    try:
+                        result = self.enrich_board(room)
+                    except (OSError, sqlite3.Error) as error:
+                        result = Outcome.failed("game_memory_storage_error", type(error).__name__)
+                    if result.is_success:
+                        room["memory"]["enriched"] = True
+                    else:
+                        report["blocked"].append({"game_id": room["game_id"], "code": result.failure.code})
+                        logger.warning("Board dialogue enrichment pending retry: %s", result.failure.code)
+            if draft != provider.store.data:
+                provider.store.commit(draft)
+        return report
 
     def _active(self):
         if self.closed:
@@ -100,6 +242,8 @@ class MemoryGameIngestion:
                 raise TaskError("memory_game_receipt_changed", "game result differs from its confirmed receipt")
             result = native["result"]
             game = result.get("game") if set(result) == {"game"} else None
+            if game and game.get("ownership_version") == 2:
+                return {"state": "native_result_owner", "view_id": None}
             outcome_name = terminal_result(game)
             if outcome_name is None:
                 return {"state": "not_completed", "view_id": None}
@@ -171,6 +315,12 @@ class MemoryGameIngestion:
         self._active()
         windows = tuple(bindings)
         report = {"considered": 0, "saved": 0, "blocked": []}
+        now = self.tasks.now()
+        if self._native_advanced_at is None or (now - self._native_advanced_at).total_seconds() >= 30:
+            self._native_advanced_at = now
+            native = self.advance_native(enrich=True)
+            report["saved"] += native["saved"]
+            report["blocked"].extend(native["blocked"])
         if not windows:
             self._last_advance.clear()
             self._binding_offset = 0

@@ -1,5 +1,7 @@
 # 我会永远陪着你
 
+> 此仓库由 kazima123 维护。`7.1.17a` 在上游 7.1.17 基础上同步五子棋与井字棋共同下棋补丁；功能、记忆分工和验证入口见 [共同下棋说明](docs/shared-board-games.md)。原作者为 menglimi，许可证沿用 AGPL-3.0-only。
+
 <div align="center">
   <img src="./logo.png" alt="我会永远陪着你" width="180">
 </div>

@@ -172,6 +172,8 @@ class NativeExtensionRegistry(AstrBotToolPort):
             raise TaskError("native_settings_catalog_changed", "the capability catalog changed; reload the V2 host")
         self._entries.update({entry.host_tool_id: (entry, replacement) for entry in replacement.declarations()})
         self._bundled_extensions = tuple(replacement if item is lease else item for item in self._bundled_extensions)
+        if replacement.manifest.package.extension_id == "game":
+            self._attach_game()
         return replacement
 
     async def reconcile_service(self, extension_id):
@@ -307,6 +309,15 @@ class NativeExtensionRegistry(AstrBotToolPort):
             raise ValueError("image settings require both native actions")
         self.image_enabled = dict(settings)
 
+    def _attach_game(self):
+        lease = self._lease("game")
+        memory = getattr(getattr(self.application, "memory", None), "game", None)
+        if lease is not None and memory is not None:
+            memory.attach_native(lease.port)
+            lease.port.invitation_authorized = lambda context, kind: f"game.{kind}.create" in {
+                tool.action for tool in self.application.external.catalog_for(context)}
+            self.application.proactive.game_provider = lease.port
+
     def attach(self, application):
         runtime = getattr(application, "runtime", None)
         if runtime is None or self._closed or (self.application is not None and self.application is not application):
@@ -326,6 +337,7 @@ class NativeExtensionRegistry(AstrBotToolPort):
         if (self.content is None and getattr(application, "messages", None) is not None
                 and any(entry[0].descriptor.tool.action in CONTENT_ACTIONS for entry in self._entries.values())):
             self.content = ContentConsumer(self, application)
+        self._attach_game()
         return self
 
     def bind_role_guard(self, guard, persona_guard=None):

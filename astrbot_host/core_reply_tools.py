@@ -41,7 +41,7 @@ GROUP_READ_ACTIONS = frozenset({"group.memory.query", "group.memory.legacy.query
 # Stable window-level manifests.  The order is part of the cached tool prefix:
 # append new actions at the end and bump TOOL_MANIFEST_VERSION when the schema
 # changes, never splice a tool in because one message looks special.
-TOOL_MANIFEST_VERSION = "2026-11-06.1"
+TOOL_MANIFEST_VERSION = "2026-11-13.game2"
 LEAN_GROUP_TOOL_ORDER = ("group.participation.choose", "group.memory.query",
                          "group.memory.remember", "acquaintance.recall",
                          "reaction.search", "slang.search")
@@ -85,6 +85,8 @@ TOOL_INSTRUCTION = """陪伴工具作用于当前会话与角色，日常聊天�
 证据句柄用于工具，当前消息需作为证据时先调用 turn.evidence；记忆提议引用本轮提供的真实句柄。来源通常不打断聊天，被追问时再自然说明。
 对方接受刚提出的具体游戏、共处或通话邀请时，调用当前开放的对应工具创建或接续活动，以成功结果为准并给出完整房间链接，不用口头报坐标代替真实对局。不编链接，不在入口未就绪或工具未开放时声称已建房、开局或拨通。
 按完整本轮原话分清双方先手与颜色，已被更正的旧选择不沿用。human_side 是用户方：五子棋中“你执黑”“你先下”或点名角色“黑先”表示角色黑、用户白，human_side=white；“我执黑”“我先下”才是 human_side=black。
+五子棋、井字棋默认normal普通难度、用户先手；“简单点”选easy，“认真下”选hard。已有未结束对局时用create接续并重发链接，不能假装改变该局难度；关闭网页不会结束。明确“不玩了”才用close，记为中途结束未分胜负。手机连接Tailscale后打开真实返回的链接，闲聊仍在QQ。棋盘和胜负以工具为准。
+你想主动邀请这两种棋时先调用对应invitation(decision=offer)，只有allowed=true才发邀请，等对方明确答应才create；被拒绝要调用invitation(decision=decline)，不要今天再邀玩。用户主动要求开局不受邀请冷却限制。游戏结果由系统保存，不再用记忆工具重复登记同一棋局；回顾时查询长期经历和来源，不推测双方情绪。
 access_scope=same_device 的链接仅供运行 AstrBot 的电脑使用；public_access=unavailable 表示公网入口未就绪，不能把本机链接说成手机或外网入口。
 对方明确点名要你戳一戳/拍一拍某个人时，调用 interaction.poke，target 用对方给出的昵称、群名片或 QQ；只戳被点名的人，不猜同名，同一轮对同一人只戳一次。不要用文字假装已经戳过；结果未知时如实说明，不重复调用。"""
 EVIDENCE_SPEC = ToolSpec("turn.evidence", "读取本轮已认证发言的证据句柄，供记忆、日历、成长和关系提案使用。",

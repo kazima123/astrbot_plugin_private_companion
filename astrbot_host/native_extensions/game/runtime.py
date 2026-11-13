@@ -61,6 +61,9 @@ class GameRuntime(NativeService, GameSettingsMethods, GameRoomsMethods, GameMedi
         self.allow_non_admin_group_creation = self._cfg_bool('rooms.allow_non_admin_group_creation', False)
         self.game_admin_ids = self._parse_qq_ids(self._cfg('rooms.game_admin_qq_ids', ''))
         self.record_shared_experience = self._cfg_bool('memory.record_shared_experience', True)
+        self.enable_proactive_invites = self._cfg_bool('companion_integration.enable_proactive_invites', True)
+        self.invite_cooldown_hours = self._cfg_int('companion_integration.proactive_invite_cooldown_hours', 24, minimum=1, maximum=720)
+        self.invite_probability = self._cfg_int('companion_integration.proactive_invite_probability_percent', 18, minimum=0, maximum=100)
         self.private_qq_game_context_enabled = self._cfg_bool('context.enable_private_qq_game_context', True)
         self.recent_game_result_ttl_seconds = self._cfg_int('context.recent_game_result_ttl_minutes', 30, minimum=0, maximum=24 * 60) * 60
         self.commentary_cooldown = self._cfg_int('game.commentary_cooldown_seconds', 45, minimum=10, maximum=600)
