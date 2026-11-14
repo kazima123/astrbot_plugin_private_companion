@@ -18,6 +18,23 @@ from tests.test_management_access import NOW, ROLE, SCOPE
 
 
 class RoleJournalMaterialProducerTests(HostFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_native_sent_reply_keeps_speaker_and_time_but_draft_is_not_material(self):
+        from companion_v2.conversation.native_observations import NativeConversationObservations
+        host = await self.start(self.host())
+        first = host.receive(self.event("context", text="可我不太会耶")).unwrap()
+        context = self.context(host.application, first)
+        observer = NativeConversationObservations(host.application.messages)
+        observer.capture_output(context, turn_id="journal-turn", event_id="journal-event",
+                                text="未发送的棋局草稿", at=NOW, state="output_observed")
+        observer.capture_output(context, turn_id="journal-turn", event_id="journal-event",
+                                text="我来掌勺，你帮忙递东西", at=NOW, state="send_returned")
+        page = host.application.journal_conversation_material_producer.for_day(context, self.target())
+        texts = [item.text for item in page.materials]
+        self.assertTrue(any("用户当时表达：可我不太会耶" in text for text in texts))
+        self.assertTrue(any("Bot 当时已发出：我来掌勺" in text for text in texts))
+        self.assertFalse(any("棋局草稿" in text for text in texts))
+        self.assertTrue(all("T" in text.split(" ")[0] for text in texts))
+
     def target(self, day="2026-09-21"):
         owner = RoleOwnerRef(SCOPE.installation_id, SCOPE.bot_id, ROLE.subject_id)
         return JournalContext(JournalKey(owner, JournalKind.DIARY, day), SCOPE, "Asia/Shanghai")
@@ -156,7 +173,8 @@ class RoleJournalMaterialProducerTests(HostFixture, unittest.IsolatedAsyncioTest
         first = producer.for_day(context, target, limit=1)
         self.assertEqual(len(first.materials), 1)
         self.assertEqual(first.materials[0].kind, MaterialKind.CONVERSATION)
-        self.assertTrue(first.materials[0].text.startswith("对方当时表达："))
+        self.assertIn(" 用户当时表达：", first.materials[0].text)
+        self.assertIn("T", first.materials[0].text.split(" 用户当时表达：")[0])
         self.assertNotEqual(first.materials[0].kind, MaterialKind.READING)
         self.assertIsNotNone(first.next_cursor)
         second = producer.for_day(context, target, limit=1, after_id=first.next_cursor)

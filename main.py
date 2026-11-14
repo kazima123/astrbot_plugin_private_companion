@@ -685,6 +685,7 @@ class PrivateCompanionV2StagingPlugin(Star):
         return token
 
     def _core_reply_delivery_callbacks(self, event, prepared, *, target):
+        event._memory_companion_delivery_owner = True
         event_ref = prepared.get("event_ref")
         origin_key = prepared.get("origin_key")
         channel = prepared.get("channel")
@@ -706,6 +707,11 @@ class PrivateCompanionV2StagingPlugin(Star):
             observer = getattr(getattr(self.staging, "session", None), "core_reply_observations", None)
             if observer is not None:
                 observer.output(current, text, state="send_returned")
+            memory_observer = getattr(event, "_memory_companion_sent_observer", None)
+            if callable(memory_observer):
+                index = getattr(event, "_memory_companion_send_index", 0) + 1
+                event._memory_companion_send_index = index
+                memory_observer(text, f"{current['turn_id']}:{index}")
 
         def observe_core_delivery(stage):
             if stage == "finished":

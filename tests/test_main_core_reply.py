@@ -771,6 +771,22 @@ class MainCoreReplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((state["send_attempts"], state["send_returns"], state["send_unknown"]), (1, 1, 0))
 
 
+    async def test_memory_observer_receives_only_sent_parts_with_distinct_ids(self):
+        plugin = ENTRY.PrivateCompanionV2StagingPlugin.__new__(ENTRY.PrivateCompanionV2StagingPlugin)
+        plugin.staging = NS(session=NS())
+        event = CoreReplyEvent()
+        event._memory_companion_sent_observer = Mock()
+        prepared = {"event_ref":"event", "turn_id":"turn", "origin_key":"origin", "channel":"private"}
+        callbacks = plugin._core_reply_delivery_callbacks(event, prepared, target=None)
+        self.assertTrue(event._memory_companion_delivery_owner)
+        event._memory_companion_sent_observer.assert_not_called()
+        callbacks['on_sent'](prepared, '实际发出的第一段')
+        callbacks['on_sent'](prepared, '实际发出的第二段')
+        self.assertEqual(event._memory_companion_sent_observer.call_args_list[0].args,
+                         ('实际发出的第一段', 'turn:1'))
+        self.assertEqual(event._memory_companion_sent_observer.call_args_list[1].args,
+                         ('实际发出的第二段', 'turn:2'))
+
     async def test_denied_send_names_the_gate_and_says_the_reply_was_not_sent(self):
         plugin = ENTRY.PrivateCompanionV2StagingPlugin.__new__(ENTRY.PrivateCompanionV2StagingPlugin)
         plugin.staging = NS(now=lambda: None)

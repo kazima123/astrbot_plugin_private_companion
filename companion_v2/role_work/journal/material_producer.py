@@ -89,7 +89,7 @@ class RoleActivityJournalMaterialProducer:
 
 
 class RoleConversationJournalMaterialProducer:
-    """Project authorized, non-withdrawn inbound messages as attributed dialogue."""
+    """Project authorized dialogue with speaker and message time intact."""
 
     def __init__(self, conversations):
         self.conversations = conversations
@@ -124,7 +124,7 @@ class RoleConversationJournalMaterialProducer:
             materials.append(JournalMaterial(
                 material_id="conversation-message-" + digest(event.scoped_key),
                 kind=MaterialKind.CONVERSATION,
-                text="对方当时表达：" + detail,
+                text=event.received_at.astimezone(zone).isoformat() + " 用户当时表达：" + detail,
                 origin="conversation-input-" + digest(event.scoped_key),
                 local_date=local_date,
                 source=event.source,
@@ -146,14 +146,14 @@ class RoleConversationJournalMaterialProducer:
         condition = ""
         if after_id is not None:
             cursor = runtime.read_one("""SELECT observed_at FROM conversation_native_observations
-                WHERE context_key = ? AND kind = 'input' AND observation_id = ?""", (context.key, after_id))
+                WHERE context_key = ? AND delivery_state IN ('input_observed','send_returned') AND observation_id = ?""", (context.key, after_id))
             if cursor is None:
                 raise TaskError("message_cursor_invalid", "native writing cursor belongs to another conversation")
             condition = " AND (observed_at > ? OR (observed_at = ? AND observation_id > ?))"
             values.extend((cursor["observed_at"], cursor["observed_at"], after_id))
         values.append(limit)
         rows = runtime.read_all("""SELECT * FROM conversation_native_observations
-            WHERE context_key = ? AND kind = 'input' AND delivery_state = 'input_observed'""" + condition
+            WHERE context_key = ? AND delivery_state IN ('input_observed','send_returned')""" + condition
             + " ORDER BY observed_at, observation_id LIMIT ?", tuple(values))
         zone, materials = ZoneInfo(target.timezone), []
         for row in rows:
@@ -162,7 +162,8 @@ class RoleConversationJournalMaterialProducer:
                 validate_observation(runtime, row, context, reference)
                 if reference.scope != target.scope:
                     continue
-                local_date = datetime.fromisoformat(row["observed_at"]).astimezone(zone).date().isoformat()
+                local_time = datetime.fromisoformat(row["observed_at"]).astimezone(zone)
+                local_date = local_time.date().isoformat()
                 if local_date != target.key.local_date:
                     continue
                 record = self.conversations._read_source(reference, context, "text", self.conversations.tasks.now())
@@ -175,7 +176,8 @@ class RoleConversationJournalMaterialProducer:
                 detail = detail[:8192] + "……（消息较长，仅保留开头）"
             materials.append(JournalMaterial(
                 material_id="conversation-message-" + digest(row["observation_id"]),
-                kind=MaterialKind.CONVERSATION, text="对方当时表达：" + detail,
+                kind=MaterialKind.CONVERSATION,
+                text=local_time.isoformat() + (" 用户当时表达：" if row["kind"] == "input" else " Bot 当时已发出：") + detail,
                 origin="native-conversation-input-" + digest(row["observation_id"]),
                 local_date=local_date, source=reference))
         cursor = "native-observation:" + rows[-1]["observation_id"] if len(rows) == limit else None
