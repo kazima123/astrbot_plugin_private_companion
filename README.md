@@ -2,6 +2,11 @@
 
 > 此仓库由 kazima123 维护。`7.1.17a` 在上游 7.1.17 基础上同步五子棋与井字棋共同下棋补丁；功能、记忆分工和验证入口见 [共同下棋说明](docs/shared-board-games.md)。原作者为 menglimi，许可证沿用 AGPL-3.0-only。
 
+Gemini 兼容修复：创建提醒工具的 `anyOf` 分支现在各自声明必填字段的类型，避免
+`parameters.any_of.required: property is not defined` 导致整轮对话被拒绝。
+直接设置时间和内容、关联已有便签两种用法均保留；提醒执行与权限校验不变。
+回归入口：`tests.test_core_reply_tools.PrivateCatalogProviderSchemaTests`。
+
 <div align="center">
   <img src="./logo.png" alt="我会永远陪着你" width="180">
 </div>

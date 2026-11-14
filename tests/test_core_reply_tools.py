@@ -431,6 +431,10 @@ class PrivateCatalogProviderSchemaTests(ExternalFixture, unittest.IsolatedAsynci
 
     def assert_portable(self, node, where):
         if isinstance(node, dict):
+            # Gemini rejects the entire chat if a required name is defined only
+            # on a parent schema, even when the JSON Schema is otherwise valid.
+            self.assertFalse(set(node.get("required", ())) - set(node.get("properties", {})),
+                             f"{where}: required fields must be declared in the same schema node")
             values = node.get("enum")
             if values is not None:
                 self.assertIsInstance(values, list, where)
@@ -460,6 +464,23 @@ class PrivateCatalogProviderSchemaTests(ExternalFixture, unittest.IsolatedAsynci
     def test_every_stored_tool_schema_is_portable(self):
         for spec in self.tools.catalog:
             self.assert_portable(json.loads(spec.parameters_json), spec.action)
+
+    def test_reminder_union_preserves_both_complete_forms_and_rejects_partial_forms(self):
+        from jsonschema import Draft202012Validator
+
+        declaration = next(item for item in self.declarations()
+                           if item["name"] == "companion_v2_reminder_create")
+        validator = Draft202012Validator(declaration["parameters"])
+        schedule = {"anchor": "2026-11-15T08:00:00+08:00", "timezone_name": "Asia/Shanghai"}
+        for arguments in ({"schedule": schedule, "message": "喝水"},
+                          {"memo_id": "memo-a", "expected_memo_revision": 1}):
+            with self.subTest(arguments=arguments):
+                self.assertTrue(validator.is_valid(arguments))
+        for arguments in ({}, {"schedule": schedule}, {"message": "喝水"},
+                          {"memo_id": "memo-a"}, {"expected_memo_revision": 1},
+                          {"schedule": schedule, "memo_id": "memo-a"}):
+            with self.subTest(arguments=arguments):
+                self.assertFalse(validator.is_valid(arguments))
 
 
 if __name__ == "__main__":

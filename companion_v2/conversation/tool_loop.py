@@ -149,9 +149,11 @@ def specification(action, required, optional=(), description="Use the original r
     if action == "reminder.create":
         # 两种合法用法：直接给时间提醒，或关联一条已经有时间的便签。
         # 不把 required 写死成其中一种，否则另一种调用会被 schema 直接拒绝。
+        # Gemini 按分支检查 required，字段定义也须在各分支内声明。
         schema["anyOf"] = [
-            {"required": ["schedule", "message"]},
-            {"required": ["memo_id", "expected_memo_revision"]},
+            {"type": "object", "properties": {name: properties[name] for name in names},
+             "required": list(names)}
+            for names in (("schedule", "message"), ("memo_id", "expected_memo_revision"))
         ]
     return ToolSpec(action, description, encode(schema))
 
