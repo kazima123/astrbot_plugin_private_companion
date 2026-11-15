@@ -13,7 +13,7 @@ V2 与「我会牢牢记住你」（下称牢插件）同处一个进程时，V2
 
 ## 三条纪律
 
-1. **推送是旁路，不是动作的一部分**。日记提交、主动消息入队之后才推；牢插件不在、
+1. **推送是旁路，不是动作的一部分**。日记提交、主动消息确认发送之后才推；牢插件不在、
    被停用、句柄坏掉、写库抛异常，领域动作照样算成功（见 :func:`push_memory`）。
 2. **身份由 V2 自己给**。每条记录带一个从 V2 持久身份推导的 ``memory_id``
    （见 :func:`push_memory_id`）。牢插件的 ``record_event`` 没有幂等键，没有这个
@@ -145,7 +145,7 @@ DEFAULT_MEMORY_PUSH = NullMemoryPush()
 async def push_memory(port, record: MemoryPushRecord) -> str | None:
     """安全的推送入口：推送的任何失败都不影响已经完成的领域动作。
 
-    这是调用方唯一该用的方式。日记已经提交、主动消息已经入队，此时牢插件不在、
+    这是调用方唯一该用的方式。日记已经提交、主动消息已确认发送，此时牢插件不在、
     被停用、句柄坏掉或者写库抛异常，都只能记一条日志然后继续——反过来让一次旁路
     推送掀掉一次已经落地的书写，是这条链路唯一不可接受的后果。
     """
@@ -155,7 +155,7 @@ async def push_memory(port, record: MemoryPushRecord) -> str | None:
     try:
         result = await port.push(record)
     except Exception as error:  # noqa: BLE001 —— 见上：任何失败都止步于此，不外抛
-        logger.debug("对外记忆推送失败（已忽略）：%s",
+        logger.warning("对外记忆推送失败（原记录已保留）：%s",
                      getattr(error, "code", None) or type(error).__name__)
         return None
     return result if isinstance(result, str) and result else None

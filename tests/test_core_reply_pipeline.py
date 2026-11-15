@@ -123,17 +123,19 @@ class CoreReplyPipelineTests(unittest.IsolatedAsyncioTestCase):
         config["platform_settings"]["segmented_reply"].update(
             enable=segmented, split_mode="regex", regex=r"[^\n]+", interval="0,0", interval_method="random",
         )
+        native_tts = NS(get_audio=AsyncMock(return_value="native-test-speech.wav"))
+
         async def get_tts_provider(_umo):
-            return (NS(get_audio=AsyncMock(return_value="native-test-speech.wav")) if tts else None)
+            return native_tts if tts else None
 
         pipeline_context = NS(astrbot_config=config,
                               plugin_manager=NS(context=NS(
-                                  get_using_tts_provider=lambda _: NS(
-                                      get_audio=AsyncMock(return_value="native-test-speech.wav")) if tts else None,
+                                  get_using_tts_provider=lambda _: native_tts if tts else None,
                                   get_using_tts_provider_async=get_tts_provider)))
         process = ProcessStage()
         process.ctx = pipeline_context
         agent = CoreAgentFixture(plugin, streaming=streaming, response_text=response_text)
+        agent.native_tts = native_tts
         process.agent_sub_stage = agent
         decorate = decorate_module.ResultDecorateStage()
         await decorate.initialize(pipeline_context)
@@ -225,6 +227,36 @@ class CoreReplyPipelineTests(unittest.IsolatedAsyncioTestCase):
         plugin, event, agent = await self.run_pipeline(tts=True, segmented=True, companion_segmenting=True)
         self.assertEqual(plugin.staging.session.core_reply_observations.outputs,
                          [("嘿嘿！", "send_returned"), ("再摸一下！", "send_returned")])
+
+    async def test_internal_split_marker_never_reaches_native_tts_or_sent_memory(self):
+        first, second = "第一段正文。", "第二段正文。"
+        for native_segmenting in (False, True):
+            for dual in (False, True):
+                with self.subTest(native_segmenting=native_segmenting, dual=dual):
+                    plugin, event, agent = await self.run_pipeline(
+                        tts=True, dual=dual, segmented=native_segmenting, companion_segmenting=True,
+                        response_text=first + "\n<<PRIVATE_COMPANION_SPLIT>>\n" + second,
+                    )
+                    spoken = [call.args[0].strip() for call in agent.native_tts.get_audio.await_args_list]
+                    self.assertEqual(spoken, [first, second], "internal control text must be removed before synthesis")
+                    records = [part.text.strip() for chain in event.sent for part in chain if isinstance(part, Record)]
+                    self.assertEqual(records, [first, second])
+                    observed = [text.strip() for text, _ in plugin.staging.session.core_reply_observations.outputs]
+                    self.assertTrue(observed)
+                    observed_body = "".join(observed)
+                    self.assertEqual(observed_body.replace(first, "").replace(second, "").strip(), "")
+                    for body in (first, second):
+                        self.assertEqual(observed_body.count(body), 2 if dual else 1,
+                                         "matching text and audio may use different bubble boundaries but retain both receipts")
+
+    async def test_marker_only_reply_has_no_native_audio_or_sent_memory(self):
+        plugin, event, agent = await self.run_pipeline(
+            tts=True, segmented=True, companion_segmenting=True,
+            response_text="<<PRIVATE_COMPANION_SPLIT>>",
+        )
+        agent.native_tts.get_audio.assert_not_awaited()
+        self.assertFalse(any(isinstance(part, Record) for chain in event.sent for part in chain))
+        self.assertEqual(plugin.staging.session.core_reply_observations.outputs, [])
 
     async def test_native_streaming_without_decoration_still_checks_permission_and_restores(self):
         plugin, event, agent = await self.run_pipeline(streaming=True)

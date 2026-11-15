@@ -368,6 +368,10 @@ def prepare_core_reply_event(
                         state["send_unknown"] += 1
                         notify_delivery("unknown")
                     raise
+                if result is False:
+                    state["send_failed"] += 1
+                    notify_delivery("failed")
+                    raise TaskError("core_reply_platform_unavailable", "the platform did not accept this reply")
                 if stream_started and state["send_returns"] == returned_before:
                     state["send_returns"] += 1
                     notify_delivery("returned")

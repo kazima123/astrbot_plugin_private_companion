@@ -347,6 +347,30 @@ class AstrBotCoreReplyTests(unittest.IsolatedAsyncioTestCase):
         state = event.get_extra(CONTEXT_EXTRA_KEY)
         self.assertEqual((state["send_attempts"], state["send_returns"], state["send_unknown"]), (0, 0, 0))
 
+    async def test_rejected_native_stream_never_becomes_sent_memory(self):
+        event = FakeEvent()
+        sent, stages = [], []
+
+        async def reject(generator):
+            async for _ in generator:
+                pass
+            return False
+
+        async def parts():
+            yield "I will call you tomorrow."
+
+        event.send_streaming = reject
+        prepare_core_reply_event(event, PreparedContext("Persona"), authorize=_allow,
+                                 on_sent=lambda _, text: sent.append(text), on_delivery=stages.append)
+        activate_core_reply_delivery_guard(event)
+        with self.assertRaises(TaskError) as failure:
+            await event.send_streaming(parts())
+        self.assertEqual(failure.exception.code, "core_reply_platform_unavailable")
+        state = event.get_extra(CONTEXT_EXTRA_KEY)
+        self.assertEqual((state["send_attempts"], state["send_returns"], state["send_failed"]), (1, 0, 1))
+        self.assertEqual(sent, [], "a rejected draft must not become a remembered promise")
+        self.assertEqual(stages, ["stream_started", "failed", "finished"])
+
 
 async def _allow(_prepared):
     return Outcome.success(True)

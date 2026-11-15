@@ -1790,22 +1790,40 @@ class PrivateCompanionV2StagingPlugin(Star):
             getter = getattr(event, "get_result", None)
             result = getter() if callable(getter) else None
             from companion_v2.conversation.text_processing import strip_internal_expression_protocol
+            from companion_v2.conversation.segment_control import controlled_parts
+            from astrbot.core.message.components import Plain
             # Both the sendable chain and the provider chain can carry the raw
             # model text; strip every plain part of each so a result assembled
             # after the response observer still cannot leak the protocol.
             stripped = 0
             for owner in (result, getattr(result, "result_chain", None)):
-                for part in getattr(owner, "chain", None) or ():
+                chain = getattr(owner, "chain", None)
+                if not isinstance(chain, list):
+                    continue
+                cleaned_chain = []
+                for part in chain:
                     text = getattr(part, "text", None)
                     if not isinstance(text, str):
+                        cleaned_chain.append(part)
                         continue
                     try:
                         cleaned = strip_internal_expression_protocol(text)
+                        if isinstance(part, Plain):
+                            segments, explicit = controlled_parts(cleaned)
+                            if explicit or "".join(segments) != cleaned:
+                                # AstrBot segments and synthesizes TTS after this
+                                # hook. Resolve protocol into real text boundaries
+                                # now, before a marker can become spoken audio.
+                                cleaned_chain.extend(Plain(segment) for segment in segments if segment.strip())
+                                stripped += len(text) - sum(map(len, segments))
+                                continue
                         if cleaned != text:
                             part.text = cleaned
                             stripped += len(text) - len(cleaned)
                     except Exception:  # noqa: BLE001 - one odd part must not skip the rest
-                        continue
+                        pass
+                    cleaned_chain.append(part)
+                owner.chain = cleaned_chain
             if stripped:
                 logger.info("[CompanionV2] 外发边界清理内部标签 chars=%d", stripped)
         except Exception:

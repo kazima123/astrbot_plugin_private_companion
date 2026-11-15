@@ -44,6 +44,8 @@ CONTENT_LIMIT = 4000
 记录本身不该为了别家的实现缩短。
 """
 
+EXCERPT_SUFFIX = "\n（以上仅为开头节选，完整内容见陪伴小屋原记录。）"
+
 BRIDGE_METHODS = {
     PUSH_PERSONA_LIFE: "record_persona_life",
     PUSH_PROACTIVE_MESSAGE: "record_proactive_message",
@@ -91,18 +93,43 @@ class AstrBotMemoryPush:
             "tags": list(record.tags),
             "metadata": dict(record.metadata),
         }
+        if len(record.content.strip()) > CONTENT_LIMIT:
+            arguments["metadata"].update(content_truncated=True, original_chars=len(record.content.strip()))
         if record.occurred_at:
             arguments["occurred_at"] = record.occurred_at
         if record.confidence is not None:
             arguments["confidence"] = record.confidence
         if record.importance is not None:
             arguments["importance"] = record.importance
+        if record.context is not None:
+            scope = record.context.scope
+            if scope.kind.value in ("private", "group") and scope.is_resolved:
+                private = scope.kind.value == "private"
+                message_type = "FriendMessage" if private else "GroupMessage"
+                arguments.update(
+                    scope=scope.kind.value,
+                    session_id=f"{scope.platform}:{message_type}:{scope.session_id}",
+                    platform=scope.platform,
+                    subject={"kind": "bot", "id": scope.account_id, "role": "bot_self"},
+                    object={"kind": "user" if private else "group", "id": scope.native_scope_id,
+                            "role": "peer_user" if private else "target_group"},
+                    group_id="" if private else scope.native_scope_id,
+                )
+                arguments["metadata"].update(
+                    bot_id=scope.account_id, owner_bot_id=scope.account_id,
+                    companion_bot_id=scope.bot_id,
+                    companion_role_id=record.context.role_binding.role.subject_id,
+                    participant_user_id=scope.native_scope_id if private else "",
+                    sender_name="Bot",
+                )
         return arguments
 
 
 def _content(record: MemoryPushRecord) -> str:
     text = record.content.strip()
-    return text[:CONTENT_LIMIT]
+    if len(text) <= CONTENT_LIMIT:
+        return text
+    return text[:CONTENT_LIMIT - len(EXCERPT_SUFFIX)] + EXCERPT_SUFFIX
 
 
 def memory_push_provider(context=None):

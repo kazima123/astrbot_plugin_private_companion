@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from datetime import datetime
 import json
+import logging
 from zoneinfo import ZoneInfo
 
 from companion_v2.execution.models import TaskContext, TaskError, digest, require
@@ -13,6 +14,9 @@ from companion_v2.sources.repositories import SourceRepository
 
 from .materials import JournalMaterial, MaterialKind, source_origin
 from .models import JournalContext
+
+
+logger = logging.getLogger(__name__)
 
 
 _STATUS = {
@@ -105,6 +109,12 @@ class RoleConversationJournalMaterialProducer:
                 or target.key.owner != owner):
             raise ReferenceValidationError("conversation material must retain its exact role and scope")
         native_prefix = "native-observation:"
+        game_prefix = "game-experience:"
+        contact_prefix = "contact-sent:"
+        if isinstance(after_id, str) and after_id.startswith(contact_prefix):
+            return self._contact_page(task_context, target, limit=limit, after_id=after_id[len(contact_prefix):])
+        if isinstance(after_id, str) and after_id.startswith(game_prefix):
+            return self._game_page(task_context, target, limit=limit, after_id=after_id[len(game_prefix):])
         if isinstance(after_id, str) and after_id.startswith(native_prefix):
             return self._native_page(task_context, target, limit=limit, after_id=after_id[len(native_prefix):])
         page = self.conversations.journal_inputs(task_context, limit=limit, after_id=after_id)
@@ -141,7 +151,7 @@ class RoleConversationJournalMaterialProducer:
         runtime = self.conversations.runtime
         self.conversations.authorize(context)
         if not observations_available(runtime):
-            return JournalMaterialPage((), None)
+            return self._game_page(context, target, limit=limit)
         values = [context.key]
         condition = ""
         if after_id is not None:
@@ -181,6 +191,77 @@ class RoleConversationJournalMaterialProducer:
                 origin="native-conversation-input-" + digest(row["observation_id"]),
                 local_date=local_date, source=reference))
         cursor = "native-observation:" + rows[-1]["observation_id"] if len(rows) == limit else None
+        if cursor is None:
+            games = self._game_page(context, target, limit=limit - len(rows))
+            return JournalMaterialPage(tuple(materials) + games.materials, games.next_cursor)
+        return JournalMaterialPage(tuple(materials), cursor)
+
+    def _game_page(self, context, target, *, limit, after_id=""):
+        """Keep the game's confirmed result, not an inferred result from chat."""
+        from companion_v2.memory.codec import source
+
+        memory_context = self.conversations.memory_context
+        if memory_context is None or context.scope.kind.value != "private":
+            return self._contact_page(context, target, limit=limit)
+        result = memory_context.memory.experiences.list(context, after_id=after_id, limit=min(limit, 50))
+        if result.failure is not None:
+            logger.warning("Journal game materials unavailable: %s", result.failure.code)
+            return self._contact_page(context, target, limit=limit)
+        page = result.unwrap()
+        zone, materials = ZoneInfo(target.timezone), []
+        for item in page["items"]:
+            if not item["view_id"].startswith(("board-experience-", "game-experience-")):
+                continue
+            reference = source(item["source"])
+            if reference.scope != target.scope:
+                continue
+            occurred = datetime.fromisoformat(item["occurred_at"]).astimezone(zone)
+            if occurred.date().isoformat() != target.key.local_date:
+                continue
+            materials.append(JournalMaterial(
+                material_id="game-result-" + digest([item["view_id"], item["revision"]]),
+                kind=MaterialKind.ACTION,
+                text=occurred.isoformat() + " 游戏记录确认：" + item["statements"][0]["text"],
+                origin="game-result-" + digest(item["view_id"]),
+                local_date=target.key.local_date, source=reference))
+        cursor = "game-experience:" + page["next_cursor"] if page["next_cursor"] else None
+        if cursor is None:
+            if len(page["items"]) == limit:
+                return JournalMaterialPage(tuple(materials), "contact-sent:")
+            contacts = self._contact_page(context, target, limit=limit - len(page["items"]))
+            return JournalMaterialPage(tuple(materials) + contacts.materials, contacts.next_cursor)
+        return JournalMaterialPage(tuple(materials), cursor)
+
+    def _contact_page(self, context, target, *, limit, after_id=""):
+        """Use published originals only for this window's confirmed proactive parts."""
+        from companion_v2.storage.codec import scope_from_row
+
+        runtime, at = self.conversations.runtime, self.conversations.tasks.now()
+        self.conversations.authorize(context)
+        rows = runtime.read_all("""SELECT s.*, d.delivery_id, d.platform_ref FROM background_deliveries d
+            JOIN sources s ON s.source_id = 'contact-sent:' || d.delivery_id
+                AND s.owner = 'proactive.confirmed_message'
+            WHERE d.origin_key = ? AND d.state = 'delivered' AND d.delivery_id > ?
+            ORDER BY d.delivery_id LIMIT ?""", (context.key, after_id, limit))
+        materials, zone = [], ZoneInfo(target.timezone)
+        for row in rows:
+            local_time = datetime.fromisoformat(row["issued_at"]).astimezone(zone)
+            if local_time.date().isoformat() != target.key.local_date:
+                continue
+            reference = SourceRef(row["source_id"], row["owner"], scope_from_row(row),
+                VersionRef(row["lineage_id"], row["source_revision"]), datetime.fromisoformat(row["issued_at"]))
+            if reference.scope != target.scope:
+                continue
+            try:
+                self.conversations.recalls.check_reply(reference.scope, row["platform_ref"])
+                record = self.conversations._read_source(reference, context, "role.journal.write", at)
+            except TaskError:
+                continue
+            materials.append(JournalMaterial(
+                material_id="contact-message-" + digest(reference), kind=MaterialKind.CONVERSATION,
+                text=local_time.isoformat() + " Bot 当时主动发出：" + record.payload,
+                origin="contact-message-" + digest(reference), local_date=target.key.local_date, source=reference))
+        cursor = "contact-sent:" + rows[-1]["delivery_id"] if len(rows) == limit else None
         return JournalMaterialPage(tuple(materials), cursor)
 
 

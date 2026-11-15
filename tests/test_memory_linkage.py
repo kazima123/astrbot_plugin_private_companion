@@ -19,6 +19,7 @@ V2 的记忆表达让位给牢插件（见 ``tests/test_memory_ownership.py``）
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 import unittest
@@ -30,6 +31,7 @@ from companion_v2.capabilities.memory_push import (MEMORY_PUSH_ID_PREFIX, PUSH_P
 from companion_v2.capabilities.ownership import (REASON_DECLARATION_ABSENT, REASON_EXTERNAL_ACTIVE,
     REASON_HANDLE_DISABLED, REASON_HANDLE_UNREADABLE, REASON_MODULE_ABSENT, RENDER_EXTERNAL, RENDER_SELF)
 from companion_v2.configuration.registry import FieldRegistry
+from companion_v2.conversation.reply_management import ReplyManagement
 from companion_v2.execution.models import TaskContext, digest
 from companion_v2.foundation.refs import AudienceRef, RoleOwnerRef
 from companion_v2.model_gateway.routing import configuration_fields
@@ -183,6 +185,17 @@ class MemoryPushPortTests(MemoryPluginDeclaration, unittest.IsolatedAsyncioTestC
 
         self.assertNotEqual(first.memory_id, second.memory_id)
 
+    async def test_long_life_record_is_explicitly_an_excerpt_not_a_complete_memory(self):
+        bridge = self.live_plugin()
+        port = memory_push_provider(None)
+        record = self.record(content="Bot 写下日记：" + "正文。" * 1600 + "结尾更正之前的说法。")
+        await port.push(record)
+        call = bridge.only("record_persona_life")
+        self.assertLessEqual(len(call["content"]), 4000)
+        self.assertTrue(call["content"].endswith("完整内容见陪伴小屋原记录。）"))
+        self.assertTrue(call["kwargs"]["metadata"]["content_truncated"])
+        self.assertEqual(call["kwargs"]["metadata"]["original_chars"], len(record.content))
+
     async def test_an_absent_declaration_is_never_written(self):
         port = memory_push_provider(None)
         self.assertIsNone(await port.push(self.record()))
@@ -293,15 +306,35 @@ class JournalMemoryPushTests(MemoryPluginDeclaration, HostFixture, unittest.Isol
         entry = self.stored()
         self.assertEqual(call["kwargs"]["memory_id"], self.expected_diary_identity(entry.reference.key, entry.reference.revision))
         self.assertEqual(call["kwargs"]["source_plugin"], PUSH_SOURCE_PLUGIN)
-        self.assertEqual(call["kwargs"]["scope"], "unknown")
-        self.assertEqual(call["kwargs"]["session_id"], "private_companion_v2:journal:diary")
+        self.assertEqual(call["kwargs"]["scope"], "private")
+        self.assertEqual(call["kwargs"]["session_id"], f"{SCOPE.platform}:FriendMessage:{SCOPE.session_id}")
+        self.assertEqual(call["kwargs"]["subject"]["id"], SCOPE.account_id)
+        self.assertEqual(call["kwargs"]["object"]["id"], SCOPE.native_scope_id)
+        self.assertEqual(call["kwargs"]["metadata"]["companion_role_id"], ROLE.subject_id)
+        self.assertNotIn("persona_id", call["kwargs"]["metadata"])
         self.assertEqual(call["kwargs"]["tags"], ["journal", "diary", "persona_life"])
         self.assertEqual(call["kwargs"]["metadata"]["journal_kind"], "diary")
         self.assertEqual(call["kwargs"]["metadata"]["local_date"], "2026-09-21")
         self.assertEqual(call["kwargs"]["metadata"]["journal_revision"], entry.reference.revision)
+        self.assertEqual(call["kwargs"]["metadata"]["journal_entry_id"],
+                         push_memory_id(PUSH_PERSONA_LIFE, "journal", entry.reference.key))
         self.assertEqual(call["kwargs"]["occurred_at"], entry.updated_at.isoformat())
 
     # ── 2. 做完的梦到达牢插件，而且与同一天的日记不撞身份 ───────────
+
+    async def test_rewritten_diary_retains_one_entry_identity_and_distinct_revisions(self):
+        bridge = self.live_plugin()
+        await self.setup_writer()
+        self.diary("当时把游戏名字写错了。")
+        self.assertEqual((await self.write()).unwrap().task.state, "succeeded")
+        self.diary("后来核对，玩的是井字棋。")
+        rewritten = await self.writer.write(self.task_context, self.trigger, self.target(),
+            role_instruction="保留的角色人格", expected_revision=1, request_id="rewrite")
+        self.assertEqual(rewritten.unwrap().task.state, "succeeded")
+        first, second = (call["kwargs"] for call in bridge.calls)
+        self.assertEqual(first["metadata"]["journal_entry_id"], second["metadata"]["journal_entry_id"])
+        self.assertEqual([first["metadata"]["journal_revision"], second["metadata"]["journal_revision"]], [1, 2])
+        self.assertNotEqual(first["memory_id"], second["memory_id"])
 
     async def test_a_completed_dream_reaches_the_memory_owner_as_its_own_record(self):
         bridge = self.live_plugin()
@@ -320,7 +353,7 @@ class JournalMemoryPushTests(MemoryPluginDeclaration, HostFixture, unittest.Isol
         self.assertIn("窄楼梯", dream["content"])
         self.assertIn("醒来还觉得轻松。", dream["content"])
         self.assertEqual(dream["kwargs"]["metadata"]["journal_kind"], "dream")
-        self.assertEqual(dream["kwargs"]["session_id"], "private_companion_v2:journal:dream")
+        self.assertEqual(dream["kwargs"]["session_id"], f"{SCOPE.platform}:FriendMessage:{SCOPE.session_id}")
         self.assertEqual(dream["kwargs"]["tags"], ["journal", "dream", "persona_life"])
         self.assertNotEqual(bridge.calls[0]["kwargs"]["memory_id"], dream["kwargs"]["memory_id"])
 
@@ -430,10 +463,11 @@ class ProactiveMemoryPushTests(MemoryPluginDeclaration, ContactFixture, unittest
         task = (await self.contact(app)).unwrap().task
 
         self.assertEqual((task.state, task.effect), ("succeeded", "committed"))
+        await self.until(lambda: bridge.calls)
         call = bridge.only("record_proactive_message")
         self.assertIn(self.visible(), call["content"])
         self.assertEqual(call["kwargs"]["memory_id"],
-                         push_memory_id(PUSH_PROACTIVE_MESSAGE, "proactive", self.contact_id(app)))
+                         push_memory_id(PUSH_PROACTIVE_MESSAGE, "proactive", self.contact_id(app), 0))
         self.assertEqual(call["kwargs"]["source_plugin"], PUSH_SOURCE_PLUGIN)
         self.assertEqual(call["kwargs"]["scope"], "private")
         self.assertEqual(call["kwargs"]["platform"], SCOPE.platform)
@@ -441,12 +475,39 @@ class ProactiveMemoryPushTests(MemoryPluginDeclaration, ContactFixture, unittest
         self.assertEqual(call["kwargs"]["metadata"]["clean_visible_text"], self.visible())
         self.assertEqual(call["kwargs"]["metadata"]["event_type"], "proactive_message")
         self.assertEqual(call["kwargs"]["metadata"]["contact_id"], self.contact_id(app))
+        self.assertEqual(call["kwargs"]["occurred_at"], self.clock.now().isoformat())
+        self.assertEqual(call["kwargs"]["metadata"]["delivery_evidence"], "platform_confirmed")
+
+    async def test_confirmed_contact_is_one_dated_diary_source_in_its_own_window(self):
+        app, bridge = await self.enabled_with_memory_plugin()
+        task = (await self.contact(app)).unwrap().task
+        await self.until(lambda: bridge.calls)
+        context = self.contact_context()
+        self.grant(self.important, SCOPE, "role.journal.write")
+        owner = RoleOwnerRef(SCOPE.installation_id, SCOPE.bot_id, ROLE.subject_id)
+        target = JournalContext(JournalKey(owner, JournalKind.DIARY, "2026-09-21"), SCOPE, "Asia/Shanghai")
+        page = app.journal_conversation_material_producer.for_day(context, target)
+        contacts = [item for item in page.materials if item.source.owner == "proactive.confirmed_message"]
+        self.assertEqual(len(contacts), 1)
+        self.assertIn("08:00:00+08:00 Bot 当时主动发出：" + self.visible(), contacts[0].text)
+        app.outbound.record_receipt(self.receipt(self.sent[0])).unwrap()
+        self.assertEqual(self.runtime.read_one("SELECT COUNT(*) FROM sources WHERE owner = ?",
+            ("proactive.confirmed_message",))[0], 1)
+        self.assertEqual(len(bridge.calls), 1)
+        other = self.other_window_context()
+        other_target = JournalContext(target.key, other.scope, target.timezone)
+        other_page = app.journal_conversation_material_producer.for_day(other, other_target)
+        self.assertFalse(any(item.source.owner == "proactive.confirmed_message" for item in other_page.materials))
+        tomorrow = JournalContext(JournalKey(owner, JournalKind.DIARY, "2026-09-22"), SCOPE, target.timezone)
+        self.assertEqual(app.journal_conversation_material_producer.for_day(context, tomorrow).materials, ())
+        await self.delivery_state(app, task.task_id, "delivered")
 
     async def test_completed_contact_retains_context_for_generic_providers(self):
         port = RecordingPort()
         app = await self.enabled(memory_push=port)
         task = (await self.contact(app)).unwrap().task
         self.assertEqual(task.state, "succeeded")
+        await self.until(lambda: port.records)
         record, = port.records
         self.assertIsNotNone(record.context)
         self.assertEqual(record.context.scope, SCOPE)
@@ -473,10 +534,82 @@ class ProactiveMemoryPushTests(MemoryPluginDeclaration, ContactFixture, unittest
 
         task = (await self.contact(app)).unwrap().task
 
+        await self.until(lambda: bridge.calls)
         self.assertEqual([call["method"] for call in bridge.calls], ["record_proactive_message"])
         self.assertEqual((task.state, task.effect), ("succeeded", "committed"))
         await self.delivery_state(app, task.task_id, "delivered")
         self.assertEqual(self.sent[0].text, self.visible())
+
+    async def test_queued_text_waits_for_the_platform_receipt(self):
+        app, bridge = await self.enabled_with_memory_plugin()
+        ready = asyncio.Event()
+
+        async def held(envelope):
+            await ready.wait()
+            return self.receipt(envelope)
+
+        self.send_behavior = held
+        task = (await self.contact(app)).unwrap().task
+        await self.until(lambda: self.sent)
+        self.assertEqual(bridge.calls, [], "an attempted send is not an utterance")
+        ready.set()
+        await self.until(lambda: bridge.calls)
+        self.assertEqual(bridge.only("record_proactive_message")["kwargs"]["metadata"]["clean_visible_text"],
+                         self.visible())
+        await self.delivery_state(app, task.task_id, "delivered")
+
+    async def _unconfirmed_receipt(self, status, state):
+        app, bridge = await self.enabled_with_memory_plugin()
+
+        async def unconfirmed(envelope):
+            return self.receipt(envelope, status)
+
+        self.send_behavior = unconfirmed
+        task = (await self.contact(app)).unwrap().task
+        await self.delivery_state(app, task.task_id, state)
+        self.assertEqual(bridge.calls, [], "unconfirmed text must not become recalled speech")
+        self.assertEqual(self.runtime.read_one("SELECT COUNT(*) FROM sources WHERE owner = ?",
+            ("proactive.confirmed_message",))[0], 0)
+
+    async def test_rejected_delivery_is_not_written_as_spoken(self):
+        await self._unconfirmed_receipt("not_sent", "failed")
+
+    async def test_accepted_without_delivery_is_not_written_as_spoken(self):
+        await self._unconfirmed_receipt("accepted", "accepted")
+
+    async def test_unknown_delivery_is_not_written_as_spoken(self):
+        await self._unconfirmed_receipt("unknown", "unknown")
+
+    async def test_partial_contact_keeps_only_the_confirmed_part(self):
+        app, bridge = await self.enabled_with_memory_plugin()
+        manager = ReplyManagement(app, self.contact_context())
+        status = manager.status(self.core).unwrap()
+        manager.configure(self.core, {"operation_key": "memory-segmented",
+            "edit_token": status["edit_token"], "changes": {"enabled": True, "llm_controlled": True,
+                "rules_enabled": False, "part_gap_mode": "fixed", "part_gap_ms": 0,
+                "content_cleanup_enabled": False}}).unwrap()
+
+        async def segmented(_envelope):
+            return answered(json.dumps({"decision": "send",
+                "text": "第一句。\n<<PRIVATE_COMPANION_SPLIT>>\n第二句。"}, ensure_ascii=False))
+
+        async def partial(envelope):
+            return self.receipt(envelope, "delivered" if envelope.sequence == 0 else "not_sent")
+
+        self.model_behavior, self.send_behavior = segmented, partial
+        task = (await self.contact(app)).unwrap().task
+        self.assertEqual(task.state, "succeeded")
+        await self.until(lambda: len(self.sent) == 2 and bridge.calls)
+        await self.delivery_state(app, task.task_id, "failed")
+        call = bridge.only("record_proactive_message")
+        self.assertEqual(call["kwargs"]["metadata"]["clean_visible_text"], "第一句。")
+        self.assertNotIn("第二句", call["content"])
+        self.assertEqual(call["kwargs"]["metadata"]["part_count"], 2)
+        # Startup reconciliation advances delivery; it must not replay old speech
+        # into a memory the user may already have corrected or removed.
+        for row in app.proactive._delivery_rows(task.task_id):
+            app.proactive.delivery_confirmed(row["delivery_id"])
+        self.assertEqual(len(bridge.calls), 1)
 
 
 if __name__ == "__main__":

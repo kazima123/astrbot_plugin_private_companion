@@ -33,7 +33,8 @@ from companion_v2.execution.runner import CAPACITY_REFUSALS, ExactTaskRunner, Ru
 from companion_v2.execution.service import outcome
 from companion_v2.expression.configuration import read_settings as expression_settings
 from companion_v2.foundation.outcome import Outcome
-from companion_v2.foundation.refs import OperationRef, VersionRef, ScopeKind, normalize_utc
+from companion_v2.foundation.refs import OperationRef, SourceRef, VersionRef, ScopeKind, normalize_utc
+from companion_v2.sources.models import SourceRecord
 from companion_v2.model_gateway.models import ModelCompletion, ModelTaskProfile, is_released
 from companion_v2.relationships.private_access import REVOCABLE_ABSENCE_CODES
 from companion_v2.role_work.state import humanized
@@ -863,6 +864,12 @@ class ProactiveContacts:
                             or receipt.status == "not_sent" and not rejected))
         if receipt.status == "delivered" and receipt.delivered_at is not None:
             self._record_open_loop_receipt(request, receipt.delivered_at)
+            # The receipt is committed by the caller before this task can run.
+            # Reuse the contact worker lifetime; shutdown must not leave a writer behind.
+            invocation = asyncio.create_task(self._push_delivered_contact(request, receipt),
+                name="companion:contact-memory:" + request.delivery_id)
+            self._invocations.add(invocation)
+            invocation.add_done_callback(self._invocations.discard)
 
     def _record_open_loop_receipt(self, request, delivered_at):
         """Record the real send time only for a delivered open-loop follow-up."""
@@ -1437,11 +1444,6 @@ class ProactiveContacts:
                         job.intent.thought.opportunity.opened_at)))
                 run.record_operation(operation.operation_id)
             self.notify()
-            # ``body is not None and judge_task is None`` 恰好就是「事务里刚把这条消息
-            # 排进投递」：待判定的分支只提交草稿，而重复检查一旦命中就把 body 置空。
-            # 推送放在事务之外，不在 SQLite 写事务里 await 别家插件的写入。
-            if body is not None and judge_task is None:
-                await self._push_contact(job.context, contact_id, body, job.intent.purpose)
             return TaskResult("succeeded", effect="committed", result_ref=contact_id if body is not None else "contact-skipped:" + contact_id,
                               operation_id=operation.operation_id, receipt_ref=operation.operation_id)
         except BaseException:
@@ -1784,38 +1786,44 @@ class ProactiveContacts:
                 next_state=OperationState.COMPLETED, observed_at=self.tasks.now()))
             run.record_operation(operation.operation_id)
         self.notify()
-        if allowed:
-            # 判定放行与直接发送是同一件事的两条互斥分支：草稿在此之前一直压着不发，
-            # 现在它才真的排进投递，因此也在这里才写进记忆。反过来，把未获准的草稿
-            # 提前推过去，会让牢插件记得一句角色从没说过的话。
-            await self._push_contact(context, contact_id, row["body"], data.get("purpose"))
         return TaskResult("succeeded", effect="committed", result_ref=contact_id,
                           operation_id=operation.operation_id, receipt_ref=operation.operation_id)
 
-    async def _push_contact(self, context, contact_id, body, purpose):
-        """把刚排进投递的主动消息推给对外表达记忆的一方；失败不影响这次投递。
-
-        身份取自 ``contact_id``（它本来就是 ``digest(task_id)`` 的持久身份）：同一条
-        草稿无论被重放几次，牢插件看到的都是同一个 ``memory_id``。
-        """
-
+    async def _push_delivered_contact(self, request, receipt):
+        """Only the confirmed part is speech; a queued or failed remainder is not."""
+        context, contact_id = request.context, request.source_ref
+        try:
+            row, data, _, _, parts = self._draft(request, self.tasks.now(), historical=True)
+        except TaskError as error:
+            logger.warning("V2 delivered contact memory unavailable: %s", error.code)
+            return
+        body = parts[request.sequence]["text"]
+        if not body.strip():
+            return
         scope = context.scope
+        reference = SourceRef("contact-sent:" + request.delivery_id, "proactive.confirmed_message",
+            scope, VersionRef(request.delivery_id, 1), receipt.delivered_at)
+        original = self.sources.prepare_message(SourceRecord(reference, context.audience, digest(body), body))
+        require(self.sources.publish(original, observed_at=self.tasks.now()))
         record = MemoryPushRecord(
-            memory_id=push_memory_id(PUSH_PROACTIVE_MESSAGE, "proactive", contact_id),
+            memory_id=push_memory_id(PUSH_PROACTIVE_MESSAGE, "proactive", contact_id, request.sequence),
             content=f"Bot 主动联系对方时说：{body}",
             kind=PUSH_PROACTIVE_MESSAGE,
             scope=_push_scope(scope.kind),
-            # V2 的核心没有平台会话 id，只有 ScopeRef；用 V2 自己的稳定命名空间，
-            # 并且带上这一轮的原生会话，避免不同窗口的主动消息互相覆盖。
+            # 领域记录保留自己的命名空间；AstrBot适配层从context恢复真实UMO。
             session_id="private_companion_v2:proactive:" + (scope.native_scope_id or scope.conversation_id or "role"),
             platform=scope.platform,
-            occurred_at=self.tasks.now().isoformat(),
+            occurred_at=receipt.delivered_at.isoformat(),
             tags=("proactive", "proactive_message", "bot_action"),
             metadata=(
                 ("event_type", "proactive_message"),
                 ("action_label", "主动私聊"),
-                ("purpose", purpose or ""),
+                ("purpose", data.get("purpose") or ""),
                 ("contact_id", contact_id),
+                ("delivery_id", request.delivery_id),
+                ("delivery_evidence", "platform_confirmed"),
+                ("part_index", request.sequence),
+                ("part_count", request.part_count),
                 # 牢插件用这段正文写它自己的可见时间线，必须是真正发出去的那句话。
                 ("clean_visible_text", body),
                 ("query_anchors", ["主动消息", "主动私聊", "刚才主动说了什么", "最近主动联系"]),

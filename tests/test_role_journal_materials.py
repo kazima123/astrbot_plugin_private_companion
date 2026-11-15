@@ -3,6 +3,7 @@
 from dataclasses import replace
 from datetime import timedelta
 import json
+from types import SimpleNamespace
 import unittest
 
 from companion_v2.execution.models import TaskContext, TaskError, digest
@@ -18,6 +19,35 @@ from tests.test_management_access import NOW, ROLE, SCOPE
 
 
 class RoleJournalMaterialProducerTests(HostFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_confirmed_games_supply_distinct_dated_results_to_the_diary(self):
+        from companion_v2.execution.models import encode
+        from companion_v2.memory.game_ingestion import MemoryGameIngestion
+        host = await self.start(self.host())
+        batch = host.receive(self.event("game-context", text="刚才玩得很开心")).unwrap()
+        context = self.context(host.application, batch)
+        app = host.application
+        game = MemoryGameIngestion(app.memory, SimpleNamespace(tasks=app.tasks, messages=app.messages))
+        room = {"game_id": "draw", "game_type": "tictactoe", "difficulty": "normal",
+                "status": "finished", "outcome": "draw", "moves": [],
+                "created_at": NOW.timestamp() - 60, "ended_at": NOW.timestamp(),
+                "owner_context": json.loads(encode(context))}
+        game.record_board(room).unwrap()
+        game.record_board({**room, "game_id": "win", "game_type": "gomoku", "outcome": "bot"}).unwrap()
+        producer = app.journal_conversation_material_producer
+        texts, cursor = [], None
+        while True:
+            page = producer.for_day(context, self.target(), limit=1, after_id=cursor)
+            texts.extend(item.text for item in page.materials)
+            cursor = page.next_cursor
+            if cursor is None:
+                break
+        game_texts = [text for text in texts if "游戏记录确认" in text]
+        self.assertEqual(len(game_texts), 2)
+        self.assertTrue(any("井字棋" in text and "平局" in text for text in game_texts))
+        self.assertTrue(any("五子棋" in text and "角色获胜" in text for text in game_texts))
+        self.assertTrue(all("08:00:00+08:00" in text for text in game_texts))
+        self.assertEqual(producer.for_day(context, self.target("2026-09-22")).materials, ())
+
     async def test_native_sent_reply_keeps_speaker_and_time_but_draft_is_not_material(self):
         from companion_v2.conversation.native_observations import NativeConversationObservations
         host = await self.start(self.host())

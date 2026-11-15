@@ -440,6 +440,7 @@ class RoleJournalWriter:
         if not content:
             return
         metadata = (
+            ("journal_entry_id", push_memory_id(PUSH_PERSONA_LIFE, "journal", key)),
             ("journal_kind", key.kind.value),
             ("local_date", key.local_date),
             ("journal_revision", head.revision),
@@ -457,8 +458,7 @@ class RoleJournalWriter:
             content=content,
             kind=PUSH_PERSONA_LIFE,
             scope="unknown",
-            # V2 的核心只有 ScopeRef，没有平台会话 id；角色日记本来也不属于某一个
-            # 聊天窗口，所以用 V2 自己的稳定命名空间，不伪造平台 umo。
+            # 领域保留日记命名空间；适配层从原始context恢复受授权窗口与真实UMO。
             session_id="private_companion_v2:journal:" + key.kind.value,
             occurred_at=head.updated_at.isoformat() if head.updated_at is not None else "",
             tags=("journal", key.kind.value, "persona_life"),
