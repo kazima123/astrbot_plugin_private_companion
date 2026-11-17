@@ -135,7 +135,7 @@ class MobileTogetherBridge:
             raise TaskError("mobile_v2_host_not_running", "the V2 companion host is not running")
         return session, application
 
-    def _target_context(self, user_id):
+    def _target_context(self, user_id, *, account_route=None):
         controller = self.controller
         if getattr(controller, "_multi_host", False):
             settings, authority = getattr(controller, "settings", None), getattr(controller, "authority", None)
@@ -152,6 +152,8 @@ class MobileTogetherBridge:
                                      for target in getattr(settings, "targets", ())}
             exact_matches, wildcard_matches = [], []
             for account in settings.accounts:
+                if account_route is not None and (account.platform_id, account.self_id) != account_route:
+                    continue
                 target = settings.private_target(account.platform_id, account.self_id, user_id)
                 if target is None:
                     continue

@@ -14,6 +14,7 @@ from companion_v2.product import CORE_COMPONENTS, PRODUCT_DISPLAY_NAME, PRODUCT_
 from companion_v2.capabilities.models import CapabilityDesiredState
 from companion_v2.capabilities.repositories import CapabilityRepository
 from companion_v2.configuration.models import ConfigLayer, ConfigTarget
+from companion_v2.execution.models import TaskError
 from companion_v2.adapters.astrbot.memory_providers import (
     ExternalMemoryProviderRegistry, PROVIDER_API_VERSION, memory_provider_registry)
 from companion_v2.diagnostics.readonly_status import read_p6_readonly_status
@@ -265,6 +266,37 @@ class UnifiedCompanionExtensionAPI:
     def close_memory_providers(self):
         # A stale facade may shut down after a replacement registry is installed.
         self._memory_providers.close()
+
+    async def memory_summary_participants(self, *, session_id, account_id, user_id, persona_id):
+        """Project only the configured gender and address of a verified private pair."""
+        platform, separator, native_session = session_id.partition(":FriendMessage:")
+        if not all((platform, separator, native_session, account_id, user_id, persona_id)):
+            return {}
+        try:
+            resolved = self._mobile_together._target_context(user_id, account_route=(platform, account_id))
+            if resolved is None:
+                return {}
+            session, application, context = resolved
+            scope = context.scope
+            if scope.session_id != native_session or (scope.platform, scope.account_id) != (platform, account_id):
+                return {}
+            persona = await session.bridge.verified_persona(scope, context.role_binding)
+            if persona["persona_id"] != persona_id:
+                return {}
+            now = self.controller.now()
+            messages = application.messages
+            relationship = messages.relationship_profile_context.capture(context, now)
+            role = messages.role_profile_context.capture(context, now)
+        except TaskError:
+            return {}
+        user_fields = relationship["fields"] if relationship else {}
+        bot_fields = role["fields"] if role else {}
+        participants = {
+            "user": {"gender": user_fields.get("user_gender", ""), "address": user_fields.get("default_nickname", "")},
+            "bot": {"gender": bot_fields.get("gender", ""), "address": bot_fields.get("name", "")},
+        }
+        return {speaker: {key: value.strip() for key, value in fields.items() if value.strip()}
+                for speaker, fields in participants.items() if any(value.strip() for value in fields.values())}
 
     async def generate_reality_touch_text(self, prompt, **kwargs):
         return await self._reality_context.generate(prompt, **kwargs)

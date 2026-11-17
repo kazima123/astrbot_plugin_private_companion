@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, patch
 
+from astrbot_host.integration_registry import UnifiedCompanionExtensionAPI
 from astrbot_host.mobile_together import MobileTogetherBridge
 from companion_v2.execution.models import TaskError
 from companion_v2.foundation.outcome import Outcome
@@ -119,6 +120,31 @@ class MobileTogetherBridgeTests(unittest.IsolatedAsyncioTestCase):
             now=lambda: datetime.now(timezone.utc),
         )
         self.bridge = MobileTogetherBridge(self.controller)
+
+    async def test_summary_participants_project_only_the_verified_private_pair(self):
+        self.context.scope.platform = "qq"
+        self.context.scope.account_id = "bot-account"
+        self.context.scope.session_id = "12345"
+        self.session.bridge = SimpleNamespace(verified_persona=AsyncMock(
+            return_value={"persona_id": "persona-a", "prompt": "full persona must stay private"}))
+        self.application.messages = SimpleNamespace(
+            relationship_profile_context=SimpleNamespace(capture=lambda *_: {
+                "fields": {"user_gender": "男", "default_nickname": "小舟", "user_birthday": "private date"}}),
+            role_profile_context=SimpleNamespace(capture=lambda *_: {
+                "fields": {"gender": "女", "name": "小星", "personality": "private personality"}}),
+        )
+        api = object.__new__(UnifiedCompanionExtensionAPI)
+        api.controller = self.controller
+        api._mobile_together = self.bridge
+        request = {"session_id": "qq:FriendMessage:12345", "account_id": "bot-account",
+                   "user_id": "12345", "persona_id": "persona-a"}
+        self.assertEqual(await api.memory_summary_participants(**request), {
+            "user": {"gender": "男", "address": "小舟"}, "bot": {"gender": "女", "address": "小星"},
+        })
+        for mismatch in ({"persona_id": "old-persona"}, {"account_id": "other-account"},
+                         {"user_id": "other-peer"}, {"session_id": "qq:GroupMessage:12345"},
+                         {"session_id": "qq:FriendMessage:other-window"}):
+            self.assertEqual(await api.memory_summary_participants(**{**request, **mismatch}), {})
 
     def test_status_uses_per_action_v2_authorization_and_room_modes(self):
         self.allowed.remove("together.room.invite")
@@ -364,6 +390,8 @@ class MobileTogetherBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(resolved)
         self.assertIs(resolved[2], context)
         self.assertEqual(selected_targets, ["exact-primary"])
+        self.assertIs(self.bridge._target_context("12345", account_route=("qq", "account-a"))[2], context)
+        self.assertIsNone(self.bridge._target_context("12345", account_route=("qq", "unknown-account")))
 
 
 if __name__ == "__main__":
