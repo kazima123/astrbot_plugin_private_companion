@@ -98,7 +98,7 @@ class MemoryReflection:
         return max(180, 2 * timeout + 30)
 
     @outcome
-    def prepare(self, context, *, request_id, start, end, role_instruction, maximum_sources=16, maximum_chars=24000, schedule_ref=None,
+    def prepare(self, context, *, request_id, start, end, role_instruction, maximum_sources=32, maximum_chars=24000, schedule_ref=None,
                 retry_of=None):
         try:
             return self._prepare(context, request_id=request_id, start=start, end=end, role_instruction=role_instruction,
@@ -171,6 +171,10 @@ class MemoryReflection:
                     # Keep only pending decisions from this repair's input set.
                     pending_ids = {identifier[8:] for identifier in manifest["repair_item_ids"] if identifier.startswith("pending:")}
                     manifest["pending"] = [v for v in manifest["pending"] if v["operation_id"] in pending_ids]
+                elif "repair_item_ids" in original:
+                    # A malformed response must not turn a scoped repair into a new extraction.
+                    manifest["repair_item_ids"] = original["repair_item_ids"]
+                    manifest["repair_material"]["allowed_item_ids"] = original["repair_item_ids"]
             now = stamp(self.tasks.now())
             connection.execute("INSERT INTO memory_reflections VALUES (?, ?, ?, ?, ?, ?, NULL, ?, NULL, ?, ?)",
                 (batch_id, owner_key(context), request_hash, encode(context), encode(manifest), "selecting",
@@ -394,8 +398,13 @@ class MemoryReflection:
         event = InboundConversationEvent(batch_id, context.actor.principal, context.scope, primary, "memory.reflect", digest(info), self.tasks.now())
         materials.append(PromptMaterial("memory", "coverage", encode(info)))
         mode = self.memory.settings.read(context)[0]["memory.reflection_response_format"] if self.memory.settings else "text"
+        instruction = REFLECTION_INSTRUCTION
+        if "repair_item_ids" in manifest:
+            instruction += ("\n本轮修复必须逐项返回的原编号：" + encode(manifest["repair_item_ids"])
+                + "。每个编号必须有一个结果；无需新增事实也返回该编号的 no_op，不能省略或用空 proposals 代替。"
+                  "pending: 编号使用 pending_decisions，不新增编号。")
         return PromptRequest(event, manifest["role_instruction"], SealedForegroundContext(tuple(materials), (), ()),
-                             REFLECTION_INSTRUCTION, context.role_binding, output_format="memory_reflection",
+                             instruction, context.role_binding, output_format="memory_reflection",
                              response_format=mode, response_schema_json=encode(REFLECTION_SCHEMA))
 
     async def _generate(self, run):

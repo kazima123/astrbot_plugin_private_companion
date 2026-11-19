@@ -145,6 +145,8 @@ class AgendaRoleSession:
                     changes["schedule"] = self._schedule(changes["schedule"])
             value = require(self.service.change_memo(self.actor, action=action.split(".", 1)[1], **mutation, **parameters))
         elif action == "reminder.create":
+            if set(parameters) not in ({"schedule", "message"}, {"memo_id", "expected_memo_revision"}):
+                raise AgendaError("invalid_tool_arguments", "provide schedule and message, or memo_id and expected_memo_revision")
             if "schedule" in parameters:
                 parameters["schedule"] = self._schedule(parameters["schedule"])
             value = require(self.service.create_reminder(self.actor, reminder_id="reminder-" + operation.operation_id, **mutation, **parameters))

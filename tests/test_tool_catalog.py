@@ -72,8 +72,10 @@ class ToolCatalogTests(MessageFixture):
         self.assertEqual(schedule["type"], "object")
         self.assertEqual(schedule["required"], ["anchor", "timezone_name"])
         self.assertIn("ISO-8601", schedule["properties"]["anchor"]["description"])
-        self.assertIn(["schedule", "message"], [branch["required"] for branch in schema["anyOf"]])
+        self.assertFalse({"anyOf", "oneOf", "allOf"} & schema.keys())
+        self.assertIn("schedule and message together", spec.description)
         self.assertEqual(schema["properties"]["message"]["type"], "string")
+        self.assertIn("提醒内容", schema["properties"]["message"]["description"])
 
     def test_agenda_catalog_rechecks_current_feature_authority(self):
         registry, _ = self.tool_registry()

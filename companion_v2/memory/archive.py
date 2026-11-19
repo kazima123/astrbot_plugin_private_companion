@@ -348,12 +348,6 @@ class MemoryArchive:
                 # be silently dropped by every later read, so the bundle text is
                 # published as first-class evidence owned by the bundle importer.
                 representation = item.get("representation") or ""
-                proposal = Proposal(operation="add", namespace=item.get("namespace", "personal"),
-                    subject=item.get("subject", "self"), predicate=item.get("predicate", ""),
-                    object=item.get("object", ""), representation=representation,
-                    qualifiers=dict(item.get("qualifiers", {})), polarity=item.get("polarity", "positive"),
-                    attribution="observed", retention="durable",
-                    confidence=item.get("confidence", 1.0))
                 source = SourceRef(atom_id, BUNDLE_OWNER, context.scope, VersionRef(atom_id, 1), at)
                 payload = representation
                 content_hash = digest(payload)
@@ -361,7 +355,12 @@ class MemoryArchive:
                     SourceRecord(source, context.audience, content_hash, payload))
                 require(self.writer.sources.publish(safe, observed_at=at))
                 evidence = Evidence(source, content_hash, 0, max(len(payload), 1), digest(payload))
-                proposal = replace(proposal, evidence=(evidence,))
+                proposal = Proposal(operation="add", namespace=item.get("namespace", "personal"),
+                    subject=item.get("subject", "self"), predicate=item.get("predicate", ""),
+                    object=item.get("object", ""), representation=representation,
+                    qualifiers=dict(item.get("qualifiers", {})), polarity=item.get("polarity", "positive"),
+                    attribution="observed", retention="durable",
+                    confidence=item.get("confidence", 1.0), evidence=(evidence,))
                 document = {"proposal": json.loads(encode(proposal)), "observed_at": stamp(at),
                             "accepted_by": self.writer.caller(context), "change_token": uuid4().hex}
                 document["imported"] = {"bundle_format": BUNDLE_FORMAT, "bundle_hash": digest(atoms),
