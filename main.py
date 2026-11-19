@@ -1269,7 +1269,7 @@ class PrivateCompanionV2StagingPlugin(Star):
         event.is_at_or_wake_command = True
         if channel == "private":
             entries = (debounced_entries if debounced_entries is not None else
-                       ((event, str(prepared.get("text") or event.message_str or ""),
+                       ((event, str(prepared.get("text") or plain_text or ""),
                          getattr(event, "created_at", None)),))
             self._private_reply_followups().start(
                 target_key or getattr(target, "target_id", ""), event, event_ref, entries)
